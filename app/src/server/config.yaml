@@ -1,0 +1,54 @@
+# 系统配置
+system:
+  env: 'local'
+  addr: 6680
+
+# JWT签名
+jwt:
+  signing-key: '${JWT_SECRET}'
+  expires-time: '24h'
+  buffer-time: '1h'
+  issuer: 'nucleagent-core'
+
+# 认证配置
+auth:
+  provider: 'builtin'
+
+# 权限控制
+rbac:
+  provider: 'builtin'
+
+# Zap日志配置
+zap:
+  level: 'info'
+  prefix: '[NUCLEAGENT-CORE]'
+  format: 'console'
+  director: 'log'
+  encode-level: 'LowercaseColorLevelEncoder'
+  stacktrace-key: 'stacktrace'
+  max-age: 0
+  show-line: true
+  log-in-console: true
+
+# MySQL配置
+mysql:
+  host: '${DB_HOST}'
+  port: '${DB_PORT}'
+  db-name: '${DB_NAME}'
+  username: '${DB_USER}'
+  password: '${DB_PASSWORD}'
+  config: 'charset=utf8mb4&parseTime=True&loc=Local'
+  max-idle-conns: 10
+  max-open-conns: 100
+  log-mode: 'error'
+  log-zap: false
+
+# 跨域配置
+cors:
+  mode: 'allow-all'
+
+# Nucleagent 配置
+nucleagent:
+  executor-url: '${EXECUTOR_URL:-http://localhost:6690}'
+  redis-addr: '${REDIS_ADDR:-localhost:6379}'
+
