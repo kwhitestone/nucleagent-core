@@ -50,7 +50,7 @@ go run main.go        # 启动（需要 MySQL + Redis）
 - **路由前缀**：所有业务路由统一挂载在 `/api/v1/addons/` 下（如 `/api/v1/addons/conversation`）；S2S 路由在 `/api/v1/addons/s2s/`
 - **S2S 认证**：core ↔ executor 通信用 `X-Executor-Token` 请求头校验（Executor 注册时签发，心跳/WebSocket 携带）
 - **错误格式**：统一返回 `{ "code": "<ERROR_CODE>", "message": "<人类可读说明>" }`（如 `CONVERSATION_NOT_FOUND`）
-- **CORS**：`cors.mode: allow-all`，允许微前端子应用跨端口访问（生产由 Nginx 同源代理）
+- **CORS**：`cors.mode: strict-whitelist`，通过环境变量配置允许的前端来源（WEB_FRONTEND_URL + CORE_FRONTEND_URL），支持分布式部署
 
 ## 边界
 
