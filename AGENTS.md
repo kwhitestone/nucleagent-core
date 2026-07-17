@@ -4,6 +4,8 @@
 
 ## 构建
 
+> 前置：首次构建需先在 repo 根目录执行 `git submodule update --init` 拉取 prism-fusion，再 `go work sync`。
+
 ```bash
 cd app/src/server
 go work sync          # 同步 prism-fusion submodule
@@ -31,20 +33,29 @@ go run main.go        # 启动（需要 MySQL + Redis）
 | tool | Tool 管理 |
 | llm-proxy | LLM 代理 (TempLLMKey + Proxy 端点) |
 | mcp | MCP 注册表 |
-| executor-reg | Executor 注册 + 心跳 + WebSocket |
+| executor-reg | Executor 注册 + 心跳 + WebSocket 连接管理 |
 | project | 项目管理 |
+
+> tool 与 mcp 边界：tool 管 Tool 记录 CRUD（元数据/配置持久化）；mcp 管 MCP server 连接注册（运行时连接生命周期）。
 
 ## 依赖
 
 - `nucleagent-shared` (GORM model + 协议) via go.work replace
 - `prism-fusion` (框架) via git submodule + go.work
-- MySQL (业务表), Redis (SSE pub/sub + 缓存)
+- MySQL (业务表), Redis (SSE pub/sub + LLM Proxy 临时 Key 存储)
 - `nucleagent-auth` (共享 JWT secret，本地验证，不远程调用)
+
+## API 约定
+
+- **路由前缀**：所有业务路由统一挂载在 `/api/v1/addons/` 下（如 `/api/v1/addons/conversation`）；S2S 路由在 `/api/v1/addons/s2s/`
+- **S2S 认证**：core ↔ executor 通信用 `X-Executor-Token` 请求头校验（Executor 注册时签发，心跳/WebSocket 携带）
+- **错误格式**：统一返回 `{ "code": "<ERROR_CODE>", "message": "<人类可读说明>" }`（如 `CONVERSATION_NOT_FOUND`）
+- **CORS**：`cors.mode: allow-all`，允许微前端子应用跨端口访问（生产由 Nginx 同源代理）
 
 ## 边界
 
 - **Always**: 新 addon 必须在 `addons/addons.go` 里 import
 - **Always**: SSE 消息通过 Redis pub/sub（多实例支持）
 - **Ask first**: 新增数据表（先改 nucleagent-shared + docs）
-- **Never**: 禁止在 Engine 端做 LLM 推理循环（全部推给 Executor）
+- **Never**: 禁止在 core 端做 LLM 推理循环（全部推给 Executor）
 - **Never**: 禁止直接连 Executor 的数据库（Executor 不连数据库）
