@@ -62,4 +62,5 @@ cors:
 nucleagent:
   executor-url: '${EXECUTOR_URL:-http://localhost:6690}'
   redis-addr: '${REDIS_ADDR:-localhost:6379}'
+  executor-token: '${EXECUTOR_TOKEN}'   # S2S 校验 X-Executor-Token（与 executor 共享）
 
