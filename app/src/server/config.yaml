@@ -52,6 +52,11 @@ cors:
       allow-headers: 'Content-Type,AccessToken,X-CSRF-Token,Authorization,Token,X-Token,X-User-Id,auth_token'
       expose-headers: 'Content-Length,Access-Control-Allow-Origin,Access-Control-Allow-Headers,Content-Type'
       allow-credentials: true
+    - allow-origin: '${AUTH_FRONTEND_URL}'
+      allow-methods: 'GET,POST,PUT,DELETE,OPTIONS'
+      allow-headers: 'Content-Type,AccessToken,X-CSRF-Token,Authorization,Token,X-Token,X-User-Id,auth_token'
+      expose-headers: 'Content-Length,Access-Control-Allow-Origin,Access-Control-Allow-Headers,Content-Type'
+      allow-credentials: true
     - allow-origin: '${CORE_FRONTEND_URL}'
       allow-methods: 'GET,POST,PUT,DELETE,OPTIONS'
       allow-headers: 'Content-Type,AccessToken,X-CSRF-Token,Authorization,Token,X-Token,X-User-Id,auth_token'
@@ -63,4 +68,5 @@ nucleagent:
   executor-url: '${EXECUTOR_URL:-http://localhost:6690}'
   redis-addr: '${REDIS_ADDR:-localhost:6379}'
   executor-token: '${EXECUTOR_TOKEN}'   # S2S 校验 X-Executor-Token（与 executor 共享）
+  public-url: '${NUCLEAGENT_PUBLIC_URL:-http://localhost:6680}'  # executor 回连 WS 用（不信任 Host 头）
 
