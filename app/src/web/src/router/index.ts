@@ -1,4 +1,9 @@
-import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
+import {
+  createRouter,
+  createWebHistory,
+  createWebHashHistory,
+  type RouteRecordRaw,
+} from "vue-router";
 import { getAccessToken } from "@/utils/token";
 
 // core 子应用在壳里挂在根路径 "/"，因此路由 base 始终为 "/"（与独立运行一致）。
@@ -29,18 +34,20 @@ const routes: RouteRecordRaw[] = [
 ];
 
 const router = createRouter({
-  history: createWebHistory(routerBase),
+  history: isMicroApp ? createWebHashHistory(routerBase) : createWebHistory(routerBase),
   routes,
 });
 
-// core 假定 JWT 已由 auth 子应用写入 localStorage。无 token 时跳到壳应用的
-// /auth 让用户登录；独立 dev 也落在 /auth（由本地反代或 dev server 处理）。
+// core 假定 JWT 已由 auth 子应用写入 localStorage。
+// 在 micro-app 子应用模式下，不做 window.location 跳转（会劫持整个壳），
+// 让壳应用决定何时切到 auth 子应用。独立 dev 时跳 /auth 登录。
 router.beforeEach((to) => {
   if (to.meta.requiresAuth && !getAccessToken()) {
-    if (typeof window !== "undefined") {
+    if (!isMicroApp && typeof window !== "undefined") {
       window.location.href = "/auth";
     }
-    return false;
+    // micro-app 模式下放行，页面内自行处理未登录状态。
+    return true;
   }
   return true;
 });

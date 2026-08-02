@@ -49,8 +49,11 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 function redirectToAuth(): void {
   clearAccessToken();
   if (typeof window === "undefined") return;
-  // In a micro-app shell the auth sub-app lives at /auth; standalone dev falls
-  // back to the same path. Avoid a redirect loop when already there.
+  // 在 micro-app 子应用模式下，不做 window.location 硬跳转（会劫持整个壳的 URL）。
+  // 只清 token，让壳应用自行决定何时切到 auth 子应用。
+  const w = globalThis as Record<string, unknown>;
+  if (w.__MICRO_APP_ENVIRONMENT__) return;
+  // 独立运行时跳 /auth。
   const path = window.location.pathname;
   if (!path.startsWith("/auth")) {
     window.location.href = "/auth";
