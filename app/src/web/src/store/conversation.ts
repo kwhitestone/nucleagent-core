@@ -19,10 +19,16 @@ export const useConversationStore = defineStore("conversation", () => {
   const loaded = ref(false);
 
   const sorted = computed(() =>
-    // Newest first by created_at, then id as a tiebreaker.
+    // Newest first by createdAt，then id 兜底。
+    // 后端返回 camelCase（createdAt），但 TS 类型仍是 snake_case（created_at），
+    // 用 as any 兼容两者；空值兜底避免 localeCompare 炸。
     [...conversations.value].sort((a, b) => {
-      const byTime = b.created_at.localeCompare(a.created_at);
-      return byTime !== 0 ? byTime : b.id - a.id;
+      const ax = a as any;
+      const bx = b as any;
+      const ta = (ax.created_at ?? ax.createdAt) ?? "";
+      const tb = (bx.created_at ?? bx.createdAt) ?? "";
+      const byTime = tb.localeCompare(ta);
+      return byTime !== 0 ? byTime : (b.id ?? 0) - (a.id ?? 0);
     }),
   );
 

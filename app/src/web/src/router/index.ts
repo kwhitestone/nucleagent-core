@@ -7,17 +7,32 @@ import {
 import { getAccessToken } from "@/utils/token";
 
 // core 子应用在壳里挂在根路径 "/"，因此路由 base 始终为 "/"（与独立运行一致）。
-// micro-app 环境探测仅用于将来需要按壳路径分桶时复用。
-const isMicroApp =
-  (globalThis as Record<string, unknown>).__MICRO_APP_ENVIRONMENT__ === true;
-void isMicroApp; // 目前 base 固定，保留探测以便后续按需扩展。
+// 嵌入探测：被主壳加载时（micro-app 沙箱 或 iframe）不做 window.location 硬跳转，
+// 让壳决定何时弹登录。独立 dev 时才跳 /auth。
+const isEmbedded =
+  (globalThis as Record<string, unknown>).__MICRO_APP_ENVIRONMENT__ === true ||
+  (typeof window !== "undefined" && window.parent !== window);
 const routerBase = "/";
 
 const routes: RouteRecordRaw[] = [
+  // 「对话」是默认入口。/ 重定向到 /chat，/chat 用 Home.vue（新建对话的 composer + 建议卡）。
+  { path: "/", redirect: "/chat" },
   {
-    path: "/",
-    name: "workbench",
-    component: () => import("@/views/Workbench.vue"),
+    path: "/chat",
+    name: "chat",
+    component: () => import("@/views/Home.vue"),
+    meta: { requiresAuth: true },
+  },
+  {
+    path: "/creation",
+    name: "creation",
+    component: () => import("@/views/Creation.vue"),
+    meta: { requiresAuth: true },
+  },
+  {
+    path: "/tasks",
+    name: "tasks",
+    component: () => import("@/views/TaskSetup.vue"),
     meta: { requiresAuth: true },
   },
   {
@@ -29,24 +44,25 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: "/:pathMatch(.*)*",
-    redirect: "/",
+    redirect: "/chat",
   },
 ];
 
 const router = createRouter({
-  history: isMicroApp ? createWebHashHistory(routerBase) : createWebHistory(routerBase),
+  history: isEmbedded ? createWebHashHistory(routerBase) : createWebHistory(routerBase),
   routes,
 });
 
-// core 假定 JWT 已由 auth 子应用写入 localStorage。
-// 在 micro-app 子应用模式下，不做 window.location 跳转（会劫持整个壳），
-// 让壳应用决定何时切到 auth 子应用。独立 dev 时跳 /auth 登录。
+// core 假定 JWT 已由主壳登录弹窗写入 localStorage（沙箱/iframe 同源共享）。
+// 嵌入模式下不做 window.location 跳转（iframe 里会导航到不存在的 /auth 导致白屏），
+// 让壳决定何时弹登录。独立 dev 时才跳 /auth。
 router.beforeEach((to) => {
   if (to.meta.requiresAuth && !getAccessToken()) {
-    if (!isMicroApp && typeof window !== "undefined") {
+    if (!isEmbedded && typeof window !== "undefined") {
       window.location.href = "/auth";
     }
-    // micro-app 模式下放行，页面内自行处理未登录状态。
+    // 嵌入模式下放行：首页/创作/任务在未登录时可浏览（无数据时显示空态），
+    // 对话视图在未登录时由后端 401 兜底。
     return true;
   }
   return true;

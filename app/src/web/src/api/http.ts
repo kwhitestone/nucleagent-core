@@ -4,11 +4,11 @@ import { getAccessToken, clearAccessToken } from "@/utils/token";
 import type { ApiErrorBody } from "./types";
 
 /**
- * Shared axios instance for the core backend (:6680).
+ * Shared axios instance for the core backend (:26680).
  *
  * - baseURL comes from VITE_CORE_BACKEND_URL when set (e.g. cross-origin in a
  *   micro-app shell), otherwise it is empty and requests use relative
- *   `/api/...` URLs that the Vite dev server proxies to :6680.
+ *   `/api/...` URLs that the Vite dev server proxies to :26680.
  * - Unlike auth, core endpoints return resources directly (no numeric
  *   envelope), so the response interceptor resolves with `response.data`
  *   unchanged. Only HTTP-level errors are normalized into `ApiError`.

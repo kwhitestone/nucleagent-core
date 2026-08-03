@@ -1,7 +1,7 @@
 # 系统配置
 system:
   env: 'local'
-  addr: 6680
+  addr: 26680
 
 # JWT签名
 jwt:
@@ -65,8 +65,8 @@ cors:
 
 # Nucleagent 配置
 nucleagent:
-  executor-url: '${EXECUTOR_URL:-http://localhost:6690}'
+  executor-url: '${EXECUTOR_URL:-http://localhost:26690}'
   redis-addr: '${REDIS_ADDR:-localhost:6379}'
   executor-token: '${EXECUTOR_TOKEN}'   # S2S 校验 X-Executor-Token（与 executor 共享）
-  public-url: '${NUCLEAGENT_PUBLIC_URL:-http://localhost:6680}'  # executor 回连 WS 用（不信任 Host 头）
+  public-url: '${NUCLEAGENT_PUBLIC_URL:-http://localhost:26680}'  # executor 回连 WS 用（不信任 Host 头）
 

@@ -114,7 +114,7 @@ func buildWSURLFromConfig() string {
 	if base == "" {
 		addr := global.PRISM_CONFIG.System.Addr
 		if addr == 0 {
-			addr = 6680
+			addr = 26680
 		}
 		base = "http://localhost:" + strconv.Itoa(addr)
 	}

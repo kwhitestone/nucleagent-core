@@ -8,12 +8,20 @@ import type {
 
 const BASE = "/api/v1/addons/conversation";
 
+/** 后端列表/详情返回 { code, message, data } 信封；data 才是业务载荷。 */
+interface Envelope<T> {
+  code?: number;
+  message?: string;
+  data?: T;
+}
+
 /**
  * GET /conversation — list conversations for the current user.
+ * 后端返回 { code, data: Conversation[] }，解包取 data。
  */
 export async function listConversations(): Promise<Conversation[]> {
-  const response = await http.get<Conversation[]>(BASE);
-  return response.data;
+  const response = await http.get<Envelope<Conversation[]>>(BASE);
+  return response.data?.data ?? [];
 }
 
 /**
@@ -23,16 +31,16 @@ export async function listConversations(): Promise<Conversation[]> {
 export async function createConversation(
   payload: CreateConversationRequest,
 ): Promise<Conversation> {
-  const response = await http.post<Conversation>(BASE, payload);
-  return response.data;
+  const response = await http.post<Envelope<Conversation>>(BASE, payload);
+  return response.data?.data as Conversation;
 }
 
 /**
  * GET /conversation/:id/messages — message history for a conversation.
  */
 export async function getMessages(conversationId: number | string): Promise<Message[]> {
-  const response = await http.get<Message[]>(`${BASE}/${conversationId}/messages`);
-  return response.data;
+  const response = await http.get<Envelope<Message[]>>(`${BASE}/${conversationId}/messages`);
+  return response.data?.data ?? [];
 }
 
 /**
