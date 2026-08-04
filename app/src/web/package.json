@@ -9,12 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.5.0",
-    "vue-router": "^4.4.0",
-    "pinia": "^2.2.0",
-    "element-plus": "^2.8.0",
     "axios": "^1.7.0",
-    "vue-i18n": "^9.14.0"
+    "element-plus": "^2.8.0",
+    "pinia": "^2.2.0",
+    "vue": "^3.5.0",
+    "vue-i18n": "^9.14.0",
+    "vue-router": "^4.4.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

@@ -73,20 +73,24 @@ export function useShellBridge(): void {
 
   window.addEventListener("message", onMessage);
 
-  // core → 壳：对话列表变化时推摘要。
-  watch(
-    () => store.sorted,
-    (list) => {
-      window.parent.postMessage(
-        {
-          source: "sub",
-          type: "conversations",
-          conversations: list.map((c) => ({ id: c.id, title: c.title, status: c.status })),
-          activeId: null,
-        },
-        "*",
-      );
-    },
-    { deep: true },
-  );
+  /** 把当前对话列表 + 选中态推给壳。列表不变但选中项变时也要重推。 */
+  function pushConversations(): void {
+    const list = store.sorted;
+    const m = router.currentRoute.value.path.match(/^\/c\/(\d+)/);
+    const activeId = m ? Number(m[1]) : null;
+    window.parent.postMessage(
+      {
+        source: "sub",
+        type: "conversations",
+        conversations: list.map((c) => ({ id: c.id, title: c.title, status: c.status })),
+        activeId,
+      },
+      "*",
+    );
+  }
+
+  // core → 壳：对话列表变化时推。
+  watch(() => store.sorted, pushConversations, { deep: true });
+  // 路由变化时也推（选中项变了，但列表数据没变，上面的 watch 不触发）。
+  watch(() => router.currentRoute.value.path, pushConversations);
 }
