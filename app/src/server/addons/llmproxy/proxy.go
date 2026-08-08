@@ -54,8 +54,14 @@ func registerProxyRoute(api huma.API, path string) {
 func handleProxy(c *gin.Context) {
 	start := time.Now()
 
-	// 1. 验签 x-llm-proxy-key。
+	// 1. 验签 x-llm-proxy-key（兼容 Authorization: Bearer —— OpenAI 兼容客户端
+	//    如 hermes custom provider 把 key 放 Bearer，而非自定义头）。
 	tempKey := c.GetHeader(llm.KeyHeader)
+	if tempKey == "" {
+		if auth := c.GetHeader("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			tempKey = strings.TrimPrefix(auth, "Bearer ")
+		}
+	}
 	tk, rp, err := resolveByTempKey(tempKey)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
@@ -77,20 +83,33 @@ func handleProxy(c *gin.Context) {
 
 	// 3. 构造反向代理。
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// 让出站请求走 HTTP(S)_PROXY 环境变量（部分 LLM 端点需经正向代理才可达）。
+	proxy.Transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
-	// 自定义 Director：保留原始 path（/api/llm-proxy/v1/* -> /v1/*），注入鉴权头。
+	// 自定义 Director：去掉 /api/llm-proxy 前缀，注入真实鉴权头。
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		// 重写 path：去掉 /api/llm-proxy 前缀。
-		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api/llm-proxy")
-		if req.URL.Path == "" {
-			req.URL.Path = "/"
+		// 先在原始 path 上去掉 /api/llm-proxy 前缀，再交给默认 Director
+		// 与 target.Path 拼接（否则拼接后前缀在中间，TrimPrefix 够不着）。
+		stripped := strings.TrimPrefix(req.URL.Path, "/api/llm-proxy")
+		// 进一步去掉 OpenAI 标准的 /v1 段，让 provider base_url 自己决定版本路径
+		// （如 GLM 的 base_url 含 /v4，hermes/openai 客户端带 /v1 会拼成 /v4/v1/…）。
+		stripped = strings.TrimPrefix(stripped, "/v1")
+		if stripped == "" {
+			stripped = "/"
 		}
-		// 注入真实 API key（按 AuthScheme）。
-		applyAuth(req, rp)
-		// 清理临时 key 头，不转发给真实 LLM。
+		req.URL.Path = stripped
+		req.URL.RawPath = ""
+		originalDirector(req)
+		// 关键：ReverseProxy 默认保留原始 Host（localhost:26680），但部分 LLM 端点
+		// （如 GLM 阿里云 WAF）按 Host 做虚拟主机/风控，Host 不匹配直接 410。
+		// 覆盖为目标 Host。
+		req.Host = target.Host
+		// 清理客户端的临时鉴权头（x-llm-proxy-key + hermes 的 Bearer 临时 key），
+		// 注入真实 provider key（按 AuthScheme）。
 		req.Header.Del(llm.KeyHeader)
+		req.Header.Del("Authorization")
+		applyAuth(req, rp)
 	}
 
 	// 4. 流式记录响应用于 CallLog：用 TeeReader 边透传边捕获前缀预览，

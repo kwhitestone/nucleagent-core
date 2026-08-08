@@ -418,9 +418,10 @@ func appendToStreaming(db *gorm.DB, convID uint, stepID, delegationID, senderSlu
 	stream.Default.PublishUpdated(convID, &existing)
 }
 
-// reqBackendForMode 按 mode 选执行后端（v1 全用 mock-llm，真实路由后置）。
+// reqBackendForMode 按 mode 选执行后端。
+// 默认走 hermes（Hermes Agent 桥接已接入）；mock-llm 仅协议联调时手动切。
 func reqBackendForMode(mode string) string {
-	return "mock-llm"
+	return "hermes"
 }
 
 // firstLine 取输入首行，截断到 maxLen。
