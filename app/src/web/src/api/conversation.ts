@@ -3,7 +3,8 @@ import type {
   Conversation,
   CreateConversationRequest,
   Message,
-  StreamEvent,
+  SSEEventName,
+  SSEMessageEvent,
 } from "./types";
 
 const BASE = "/api/v1/addons/conversation";
@@ -44,6 +45,20 @@ export async function getMessages(conversationId: number | string): Promise<Mess
 }
 
 /**
+ * POST /conversation/:id/follow-up — append a message and re-execute (multi-turn).
+ */
+export async function followUp(
+  conversationId: number | string,
+  input: string,
+): Promise<Conversation> {
+  const response = await http.post<Envelope<Conversation>>(
+    `${BASE}/${conversationId}/follow-up`,
+    { input },
+  );
+  return response.data?.data as Conversation;
+}
+
+/**
  * Build the absolute SSE URL. When apiBase() is empty (standalone dev) the
  * relative URL is fine for fetch; under a micro-app shell apiBase() carries the
  * configured origin.
@@ -54,32 +69,49 @@ function streamUrl(conversationId: number | string): string {
 }
 
 /**
- * Parse a single SSE frame block into a StreamEvent. A frame is the text
- * between two blank lines; its data lines are JSON-joined and parsed.
- * Returns undefined for keep-alive/comment frames (no data).
+ * Parse a single SSE frame block into an SSEMessageEvent.
+ *
+ * 后端帧格式（router.go writeSSEEvent）：
+ *   id: <messageId>
+ *   event: message-created | message-updated | message-deleted
+ *   data: { ...完整 Message... }
+ *
+ * 返回 undefined 表示 keep-alive/注释帧（无 data）。
  */
-function parseFrame(block: string): StreamEvent | undefined {
-  const dataLines = block
-    .split("\n")
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trimStart());
+function parseFrame(block: string): SSEMessageEvent | undefined {
+  const lines = block.split("\n");
+  const dataLines = lines
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => l.slice(5).trimStart());
   if (dataLines.length === 0) return undefined;
+
+  let id = 0;
+  let eventName: SSEEventName = "message-created";
+  for (const line of lines) {
+    if (line.startsWith("id:")) {
+      id = Number(line.slice(3).trim()) || 0;
+    } else if (line.startsWith("event:")) {
+      const v = line.slice(6).trim() as SSEEventName;
+      if (v === "message-created" || v === "message-updated" || v === "message-deleted") {
+        eventName = v;
+      }
+    }
+  }
+
   const payload = dataLines.join("\n");
-  if (payload === "[DONE]") {
-    return { type: "done" };
-  }
+  let message: Message | undefined;
   try {
-    return JSON.parse(payload) as StreamEvent;
+    message = JSON.parse(payload) as Message;
   } catch {
-    // Malformed JSON — surface as a synthetic error so callers can react.
-    return { type: "error", message: `Malformed SSE frame: ${payload}` };
+    return undefined;
   }
+  return { event: eventName, id, message };
 }
 
 /**
  * GET /conversation/:id/messages/stream — SSE subscription.
  *
- * Yields decoded StreamEvents as they arrive. Uses the raw fetch +
+ * Yields decoded SSEMessageEvents as they arrive. Uses the raw fetch +
  * ReadableStream decoder (axios cannot stream). Handles frames split across
  * chunk boundaries by buffering until a frame terminator (\n\n) is seen.
  *
@@ -89,7 +121,7 @@ function parseFrame(block: string): StreamEvent | undefined {
 export async function* streamMessages(
   conversationId: number | string,
   signal?: AbortSignal,
-): AsyncGenerator<StreamEvent, void, unknown> {
+): AsyncGenerator<SSEMessageEvent, void, unknown> {
   const response = await fetch(streamUrl(conversationId), {
     method: "GET",
     headers: authHeaders(),

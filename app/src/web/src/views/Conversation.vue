@@ -5,16 +5,16 @@
  * 消息列表（用户/助手气泡）+ 输入框工具栏。
  * 替代旧版：去掉自带侧栏与头部（chrome 上移到壳），换上设计稿的气泡样式。
  */
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
-import http, { ApiError } from "@/api/http";
-import { getMessages } from "@/api/conversation";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import { ApiError } from "@/api/http";
+import { followUp as followUpApi, getMessages } from "@/api/conversation";
 import type { Message } from "@/api/types";
 import { useStreamConversation } from "@/composables/useStreamConversation";
 import { toast } from "@/composables/useToast";
 
 const props = defineProps<{ id: string }>();
-
-const BASE = `/api/v1/addons/conversation/${props.id}`;
+const { t } = useI18n();
 
 const messages = ref<Message[]>([]);
 const loading = ref(true);
@@ -32,9 +32,11 @@ async function scrollToBottom(): Promise<void> {
   if (el) el.scrollTop = el.scrollHeight;
 }
 
-function appendMessage(message: Message): void {
-  messages.value = [...messages.value, message];
-}
+// 消息列表变化时自动滚到底（SSE 推送的 agent 消息异步到达）。
+watch(
+  () => messages.value.length,
+  () => { void scrollToBottom(); },
+);
 
 async function loadHistory(): Promise<void> {
   loading.value = true;
@@ -42,41 +44,50 @@ async function loadHistory(): Promise<void> {
     messages.value = await getMessages(props.id);
     await scrollToBottom();
   } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : "加载消息失败");
+    toast.error(error instanceof ApiError ? error.message : t("conversation.loadMessagesFailed"));
   } finally {
     loading.value = false;
   }
 }
 
+/**
+ * 发送 follow-up（多轮对话）。
+ *
+ * 只 POST 触发后端执行——流式 agent 回复由 onMounted 建立的**长期 SSE 连接**
+ * 自动推送并渲染（见 useStreamConversation）。不要在这里再开第二个 SSE 订阅，
+ * 那会阻塞 sending 永不解锁（broker channel 在连接存活期间持续阻塞）。
+ *
+ * sending 在收到本轮终态消息（result/error）后由下方 watch 解锁。
+ */
 async function handleFollowUp(): Promise<void> {
   const text = followUp.value.trim();
   if (!text || sending.value) return;
   sending.value = true;
-
-  appendMessage({
-    id: Date.now(),
-    conversation_id: Number(props.id),
-    sender_type: "user",
-    sender_name: "你",
-    msg_type: "text",
-    content: text,
-    created_at: new Date().toISOString(),
-  });
   followUp.value = "";
-  await scrollToBottom();
 
-  abort?.abort();
-  abort = new AbortController();
   try {
-    await http.post(`${BASE}/follow-up`, { input: text });
-    await consumeStream(abort.signal);
-    await scrollToBottom();
+    await followUpApi(props.id, text);
+    // 不 await consumeStream；agent 回复经长期 SSE 连接到达。
   } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : "发送失败");
-  } finally {
+    toast.error(error instanceof ApiError ? error.message : t("conversation.sendFailed"));
     sending.value = false;
   }
 }
+
+// 标记本轮是否已出现过 streaming（用于判断执行周期，避免被初始历史误触发）。
+let sawStreamingThisCycle = false;
+watch(
+  () => streamingId.value,
+  (cur, prev) => {
+    // 从 null -> 有值：新一轮 streaming 开始。
+    if (cur !== null) sawStreamingThisCycle = true;
+    // 从有值 -> null 且本轮有过 streaming：终态到达，解锁输入框。
+    if (cur === null && prev !== null && sawStreamingThisCycle && sending.value) {
+      sending.value = false;
+      sawStreamingThisCycle = false;
+    }
+  },
+);
 
 onMounted(async () => {
   await loadHistory();
@@ -93,23 +104,23 @@ void streamingId;
 </script>
 
 <template>
-  <div class="view active" style="height:100%">
+  <div class="view active view--scroll-hidden">
     <div class="chat-view">
       <div ref="scroller" class="chat-messages">
-        <p v-if="!loading && messages.length === 0" class="chat-empty">开始你的第一次对话吧</p>
+        <p v-if="!loading && messages.length === 0" class="chat-empty">{{ t('conversation.empty') }}</p>
 
         <div
           v-for="m in messages"
           :key="m.id"
           class="message"
-          :class="m.sender_type === 'user' ? 'user' : 'assistant'"
+          :class="m.senderType === 'user' ? 'user' : 'assistant'"
         >
           <div class="message-avatar">
-            <template v-if="m.sender_type === 'user'">你</template>
+            <template v-if="m.senderType === 'user'">{{ t('conversation.you') }}</template>
             <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" /><path d="M12 22V12" /><path d="M4 7l8 5 8-5" /></svg>
           </div>
           <div class="message-content">
-            <div class="message-author">{{ m.sender_type === "user" ? "你" : "NucleAgent" }}</div>
+            <div class="message-author">{{ m.senderType === "user" ? t('conversation.you') : t('home.greeting') }}</div>
             <div class="message-bubble" v-html="m.content || ''" />
           </div>
         </div>
@@ -119,20 +130,20 @@ void streamingId;
         <div class="chat-composer">
           <textarea
             v-model="followUp"
-            placeholder="继续对话..."
+            :placeholder="t('conversation.followUpPlaceholder')"
             :disabled="sending"
             @keydown.enter.exact.prevent="handleFollowUp"
           />
           <div class="composer-toolbar">
-            <button class="tool-btn" type="button" title="附件">
+            <button class="tool-btn" type="button" :title="t('common.attachment')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
-              附件
+              {{ t('common.attachment') }}
             </button>
-            <button class="tool-btn active" type="button" title="Agent 模式">
+            <button class="tool-btn active" type="button" :title="t('conversation.agentMode')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
-              Agent 模式
+              {{ t('conversation.agentMode') }}
             </button>
-            <button class="composer-btn send" type="button" title="发送" :disabled="sending || !followUp.trim()" @click="handleFollowUp">
+            <button class="composer-btn send" type="button" :title="t('common.send')" :disabled="sending || !followUp.trim()" @click="handleFollowUp">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
             </button>
           </div>

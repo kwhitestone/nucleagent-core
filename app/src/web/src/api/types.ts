@@ -2,8 +2,11 @@
  * Shared API type definitions matching the nucleagent-core backend contract
  * (see nucleagent-docs/03-data-models.md and 04-api-contracts.md).
  *
- * core endpoints return resources directly (not the numeric { code, message,
- * data } envelope used by auth). Errors use a string `code`.
+ * 后端 Go struct 的 json tag 全部使用 camelCase（userId/createdAt/senderType
+ * 等），前端类型定义必须与之对齐。后端列表/详情返回 { code, message, data }
+ * 信封，由 api/conversation.ts 的 Envelope<T> 解包。
+ *
+ * Errors use a string `code`.
  */
 
 /** Error envelope returned by core on failure: { code, message }. */
@@ -12,20 +15,20 @@ export interface ApiErrorBody {
   message: string;
 }
 
-/** Conversation row (conversations table). */
+/** Conversation row (conversations table). 后端 json tag 是 camelCase。 */
 export interface Conversation {
   id: number;
-  user_id: number;
-  agent_id?: number | null;
-  project_id?: number | null;
+  userId: number;
+  agentId?: number | null;
+  projectId?: number | null;
   title: string;
   mode: ConversationMode;
   status: ConversationStatus;
-  provider_id?: number | null;
+  providerId?: number | null;
   model?: string;
-  created_at: string;
-  updated_at: string;
-  completed_at?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
 }
 
 export type ConversationMode = "a2a" | "a2a_agent" | "a2a_employee";
@@ -37,16 +40,16 @@ export type ConversationStatus =
   | "failed"
   | "cancelled";
 
-/** Message row (messages table). */
+/** Message row (messages table). 后端 json tag 是 camelCase。 */
 export interface Message {
   id: number;
-  conversation_id: number;
-  sender_type: MessageSender;
-  sender_name: string;
-  msg_type: MessageType;
+  conversationId: number;
+  senderType: MessageSender;
+  senderName: string;
+  msgType: MessageType;
   content: string;
   metadata?: Record<string, unknown>;
-  created_at: string;
+  createdAt: string;
 }
 
 export type MessageSender = "user" | "agent" | "system" | "tool";
@@ -64,51 +67,61 @@ export interface CreateConversationRequest {
   mode: ConversationMode;
   input: string;
   model?: string;
+  /** 暂存执行模式/输出格式等前端-only 元数据（后端暂未持久化，预留给未来字段）。 */
+  metadata?: Record<string, unknown>;
 }
 
-/** Agent template row (agent_templates table, GET /agent/templates item). */
+/** Agent template row (agent_templates table, GET /agent/templates item).
+ *  后端返回 camelCase JSON（isActive/createdAt/updatedAt），类型与之对齐。 */
 export interface AgentTemplate {
   id: number;
   name: string;
   slug: string;
-  config?: Record<string, unknown>;
+  config?: {
+    category?: string;
+    role?: string;
+    personality?: string;
+    prompt?: string;
+    avatar?: string;
+    color?: string;
+    sort_order?: number;
+    [key: string]: unknown;
+  };
   i18n?: Record<string, unknown>;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
-/** Skill row (skills table, GET /skill item). */
+/** Skill row (skills table, GET /skill item). 后端返回 camelCase JSON。 */
 export interface Skill {
   id: number;
   name: string;
   slug: string;
   config?: Record<string, unknown>;
   i18n?: Record<string, unknown>;
-  is_active: boolean;
+  isActive: boolean;
 }
 
 /**
- * Decoded SSE event from GET /conversation/:id/messages/stream.
+ * Decoded SSE frame from GET /conversation/:id/messages/stream.
  *
- * The executor streams delta types over the WebSocket relay; the SSE fan-out
- * surfaces them as `text_delta` / `thinking_delta` / `tool_use` / `done` /
- * `error` / `need_input` (see 04-api-contracts.md §6).
+ * 后端 SSE 扇出（router.go serveSSE）按 broker 事件推送完整 Message 对象，
+ * 帧格式为：
+ *   id: <messageId>
+ *   event: message-created | message-updated | message-deleted
+ *   data: { ...完整 Message(camelCase)... }
+ *
+ * 即每个 SSE 事件携带的是整条消息（创建/更新/删除），不是增量 delta。
+ * 前端按 event 类型 upsert 到消息列表即可。
  */
-export interface StreamEvent {
-  type:
-    | "text_delta"
-    | "thinking_delta"
-    | "tool_use"
-    | "plan_uplink"
-    | "need_input"
-    | "done"
-    | "error"
-    | "status";
-  content?: string;
-  text?: string;
-  question?: string;
-  message?: string;
-  tool?: string;
-  plan?: unknown;
+export type SSEEventName = "message-created" | "message-updated" | "message-deleted";
+
+export interface SSEMessageEvent {
+  /** SSE 帧的 event: 字段。 */
+  event: SSEEventName;
+  /** SSE 帧的 id: 字段（= message id），用于 Last-Event-ID 重连。 */
+  id: number;
+  /** message-created/updated 时是完整 Message；message-deleted 时是 {id}。 */
+  message?: Message;
 }

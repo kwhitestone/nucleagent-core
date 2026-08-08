@@ -1,32 +1,88 @@
 <script setup lang="ts">
 /**
- * 创作视图 —— 对齐 design/nucleagent-design.html 第 1929–1978 行。
+ * 创作视图 - 对齐 design/nucleagent-design.html 第 1929–1978 行。
  *
  * 5 张 .creation-card（data-color 五色变体 + hover 箭头）。
  *
- * 降级策略：创作类型暂为前端常量（后端无对应分类接口）。点击后把类型作为
- * 预填内容跳到首页 composer，让用户补充描述后创建对话——避免点进去空白。
+ * 数据来源：GET /api/v1/addons/agent/templates，按 config.category 映射到五色卡片。
+ * 接口不可用时降级到 i18n 前端常量 + console.warn。
  */
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
+import { listAgentTemplates } from "@/api/agent";
+import type { AgentTemplate } from "@/api/types";
 
 const router = useRouter();
+const { t } = useI18n();
 
-interface CreationType {
-  color: "image" | "ppt" | "write" | "video" | "music";
+type CardColor = "image" | "ppt" | "write" | "video" | "music";
+
+interface CreationCard {
+  color: CardColor;
   title: string;
   desc: string;
   prompt: string;
 }
 
-const types: CreationType[] = [
-  { color: "image", title: "AI 绘画", desc: "文字描述生成高质量图片，支持多种风格", prompt: "AI 绘画：" },
-  { color: "ppt", title: "演示文稿", desc: "从大纲到精美 PPT，自动排版与配图", prompt: "演示文稿：" },
-  { color: "write", title: "文档撰写", desc: "自动生成报告、文章、技术文档", prompt: "文档撰写：" },
-  { color: "video", title: "视频生成", desc: "文字脚本自动生成短视频内容", prompt: "视频生成：" },
-  { color: "music", title: "音乐创作", desc: "AI 辅助编曲、配器与音乐生成", prompt: "音乐创作：" },
+/** category -> color 映射；未知 category 按 index 轮转五色。 */
+const CATEGORY_COLOR_MAP: Record<string, CardColor> = {
+  image: "image",
+  ppt: "ppt",
+  write: "write",
+  video: "video",
+  music: "music",
+  general: "write",
+  assistant: "write",
+};
+
+const COLOR_FALLBACK: CardColor[] = ["image", "ppt", "write", "video", "music"];
+
+/** 接口不可用时的 i18n 降级常量。 */
+const typeKeys: { color: CardColor; key: string }[] = [
+  { color: "image", key: "image" },
+  { color: "ppt", key: "ppt" },
+  { color: "write", key: "write" },
+  { color: "video", key: "video" },
+  { color: "music", key: "music" },
 ];
 
-function pick(c: CreationType): void {
+const fallbackCards = computed<CreationCard[]>(() =>
+  typeKeys.map(({ color, key }) => ({
+    color,
+    title: t(`creation.types.${key}.title`),
+    desc: t(`creation.types.${key}.desc`),
+    prompt: t(`creation.types.${key}.prompt`),
+  })),
+);
+
+const cards = ref<CreationCard[]>([...fallbackCards.value]);
+
+/** 把后端 AgentTemplate 转成前端 CreationCard。 */
+function templateToCard(tpl: AgentTemplate, index: number): CreationCard {
+  const cfg = tpl.config ?? {};
+  const category = (cfg.category as string) ?? "";
+  const color = CATEGORY_COLOR_MAP[category] ?? COLOR_FALLBACK[index % COLOR_FALLBACK.length];
+  return {
+    color,
+    title: tpl.name,
+    desc: (cfg.personality as string) || (cfg.role as string) || "",
+    prompt: `${tpl.name}：`,
+  };
+}
+
+onMounted(async () => {
+  try {
+    const templates = await listAgentTemplates();
+    if (templates.length > 0) {
+      cards.value = templates.map((tpl, i) => templateToCard(tpl, i));
+    }
+  } catch (e) {
+    console.warn("[Creation] agent/templates 接口不可用，降级到前端常量", e);
+  }
+});
+
+function pick(c: CreationCard): void {
   // 跳回首页并把类型预填进 composer。首页通过 query 携带预填文本。
   router.push({ name: "home", query: { prefill: c.prompt } });
 }
@@ -36,12 +92,12 @@ function pick(c: CreationType): void {
   <div class="view active">
     <div class="creation-view">
       <div class="creation-header">
-        <h2>创作工坊</h2>
-        <p>选择创作类型，AI 帮你从零到一</p>
+        <h2>{{ t('creation.title') }}</h2>
+        <p>{{ t('creation.subtitle') }}</p>
       </div>
       <div class="creation-grid">
         <div
-          v-for="c in types"
+          v-for="c in cards"
           :key="c.color"
           class="creation-card"
           :data-color="c.color"

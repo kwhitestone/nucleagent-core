@@ -1,22 +1,27 @@
 <script setup lang="ts">
 /**
- * 任务视图 —— 对齐 design/nucleagent-design.html 第 1981–2046 行。
+ * 任务视图 - 对齐 design/nucleagent-design.html 第 1981–2046 行。
  *
  * 3 张 .template-card + .task-form（名称/描述/执行模式/输出格式）。
  *
- * 降级策略：模板暂为前端常量（后端无任务模板接口）。启动任务走已存在的
- * POST /conversation，执行模式/输出格式暂存进 input 文本（后端暂无 metadata
- * 字段），不阻塞流程。
+ * 数据来源：GET /api/v1/addons/agent/templates，映射为任务模板卡片。
+ * 接口不可用时降级到 i18n 前端常量 + console.warn。
+ *
+ * 启动任务走 POST /conversation，执行模式/输出格式暂存 metadata 字段
+ * （后端暂未持久化，预留给未来字段），不阻塞流程。
  */
-import { reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { ApiError } from "@/api/http";
+import { listAgentTemplates } from "@/api/agent";
 import { useConversationStore } from "@/store/conversation";
 import { toast } from "@/composables/useToast";
-import type { ConversationMode } from "@/api/types";
+import type { AgentTemplate, ConversationMode } from "@/api/types";
 
 const router = useRouter();
 const store = useConversationStore();
+const { t } = useI18n();
 
 interface TaskTemplate {
   icon: string;
@@ -26,26 +31,88 @@ interface TaskTemplate {
   defaultDesc: string;
 }
 
-const templates: TaskTemplate[] = [
-  { icon: "📊", name: "竞品分析", desc: "自动收集与对比", defaultName: "AI Agent 市场竞品分析", defaultDesc: "分析当前 AI Agent 市场的主要玩家，对比它们的技术路线、定价策略和目标客户群体，输出一份结构化的竞品分析报告。" },
-  { icon: "📝", name: "内容创作", desc: "文章与报告", defaultName: "内容创作任务", defaultDesc: "围绕指定主题撰写一篇结构清晰的长文。" },
-  { icon: "🔍", name: "数据调研", desc: "深度信息搜集", defaultName: "数据调研任务", defaultDesc: "针对指定问题搜集并整理关键数据与来源。" },
+/** 接口不可用时的 i18n 降级常量。 */
+const templateKeys: { icon: string; key: string }[] = [
+  { icon: "📊", key: "competitiveAnalysis" },
+  { icon: "📝", key: "contentCreation" },
+  { icon: "🔍", key: "dataResearch" },
 ];
+
+const fallbackTemplates = computed<TaskTemplate[]>(() =>
+  templateKeys.map(({ icon, key }) => ({
+    icon,
+    name: t(`task.templates.${key}.name`),
+    desc: t(`task.templates.${key}.desc`),
+    defaultName: t(`task.templates.${key}.defaultName`),
+    defaultDesc: t(`task.templates.${key}.defaultDesc`),
+  })),
+);
+
+const templates = ref<TaskTemplate[]>([...fallbackTemplates.value]);
+
+const ICONS = ["📊", "📝", "🔍", "🤖", "📋", "🔬"];
+
+/** 把后端 AgentTemplate 转成前端 TaskTemplate。 */
+function templateToTask(tpl: AgentTemplate, index: number): TaskTemplate {
+  const cfg = tpl.config ?? {};
+  return {
+    icon: ICONS[index % ICONS.length],
+    name: tpl.name,
+    desc: (cfg.role as string) || (cfg.personality as string) || "",
+    defaultName: tpl.name,
+    defaultDesc: (cfg.prompt as string) || `使用 ${tpl.name} 执行任务。`,
+  };
+}
+
+onMounted(async () => {
+  try {
+    const tpls = await listAgentTemplates();
+    if (tpls.length > 0) {
+      templates.value = tpls.map((tpl, i) => templateToTask(tpl, i));
+      // 选中第一个模板填充表单。
+      selectTemplate(0);
+    }
+  } catch (e) {
+    console.warn("[TaskSetup] agent/templates 接口不可用，降级到前端常量", e);
+  }
+});
 
 const selected = ref(0);
 
 const form = reactive({
-  name: templates[0].defaultName,
-  desc: templates[0].defaultDesc,
-  execMode: "全自动执行",
-  outputFormat: "Markdown 文档",
+  name: "",
+  desc: "",
+  execMode: "auto",
+  outputFormat: "markdown",
 });
+
+// Sync form defaults when templates load or selection changes
+function syncFormDefaults(): void {
+  const tpl = templates.value[selected.value];
+  form.name = tpl.defaultName;
+  form.desc = tpl.defaultDesc;
+}
+
+// Initialize with first template
+syncFormDefaults();
 
 function selectTemplate(i: number): void {
   selected.value = i;
-  form.name = templates[i].defaultName;
-  form.desc = templates[i].defaultDesc;
+  syncFormDefaults();
 }
+
+const execModeOptions = computed(() => [
+  { value: "auto", label: t("task.execModes.auto") },
+  { value: "stepByStep", label: t("task.execModes.stepByStep") },
+  { value: "planOnly", label: t("task.execModes.planOnly") },
+]);
+
+const outputFormatOptions = computed(() => [
+  { value: "markdown", label: t("task.outputFormats.markdown") },
+  { value: "pdf", label: t("task.outputFormats.pdf") },
+  { value: "ppt", label: t("task.outputFormats.ppt") },
+  { value: "excel", label: t("task.outputFormats.excel") },
+]);
 
 const submitting = ref(false);
 
@@ -53,18 +120,27 @@ async function launch(): Promise<void> {
   if (submitting.value) return;
   const name = form.name.trim();
   if (!name) {
-    toast.warning("请填写任务名称");
+    toast.warning(t("task.fillName"));
     return;
   }
   submitting.value = true;
   try {
-    // 执行模式/输出格式暂拼进 input（后端暂无独立字段），降级但不丢信息。
-    const input = `${form.desc.trim()}\n\n[执行模式: ${form.execMode} | 输出格式: ${form.outputFormat}]`;
+    // 执行模式/输出格式暂存 metadata（后端暂未持久化，预留给未来字段）。
+    const input = form.desc.trim();
     const mode: ConversationMode = "a2a_agent";
-    const created = await store.create({ mode, input, model: "" });
+    const created = await store.create({
+      mode,
+      input,
+      model: "",
+      metadata: {
+        execMode: form.execMode,
+        outputFormat: form.outputFormat,
+        taskName: name,
+      },
+    });
     router.push(`/c/${created.id}`);
   } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : "启动任务失败");
+    toast.error(error instanceof ApiError ? error.message : t("task.launchFailed"));
   } finally {
     submitting.value = false;
   }
@@ -75,60 +151,55 @@ async function launch(): Promise<void> {
   <div class="view active">
     <div class="task-setup-view">
       <div class="task-setup-header">
-        <h2>创建任务</h2>
-        <p>选择模板或自定义任务，Agent 会自动规划执行</p>
+        <h2>{{ t('task.title') }}</h2>
+        <p>{{ t('task.subtitle') }}</p>
       </div>
 
       <div class="task-templates">
         <div
-          v-for="(t, i) in templates"
-          :key="t.name"
+          v-for="(tpl, i) in templates"
+          :key="i"
           class="template-card"
           :class="{ selected: selected === i }"
           @click="selectTemplate(i)"
         >
-          <div class="tpl-icon">{{ t.icon }}</div>
-          <div class="tpl-name">{{ t.name }}</div>
-          <div class="tpl-desc">{{ t.desc }}</div>
+          <div class="tpl-icon">{{ tpl.icon }}</div>
+          <div class="tpl-name">{{ tpl.name }}</div>
+          <div class="tpl-desc">{{ tpl.desc }}</div>
         </div>
       </div>
 
       <div class="task-form">
         <div class="form-group">
-          <label>任务名称 <span class="label-hint">- 给你的任务起个名字</span></label>
-          <input v-model="form.name" type="text" class="form-input" placeholder="输入任务名称" />
+          <label>{{ t('task.form.nameLabel') }} <span class="label-hint">{{ t('task.form.nameHint') }}</span></label>
+          <input v-model="form.name" type="text" class="form-input" :placeholder="t('task.form.namePlaceholder')" />
         </div>
 
         <div class="form-group">
-          <label>任务描述 <span class="label-hint">- 越详细，Agent 执行越精准</span></label>
-          <textarea v-model="form.desc" class="form-textarea" placeholder="描述任务目标、范围和期望输出" />
+          <label>{{ t('task.form.descLabel') }} <span class="label-hint">{{ t('task.form.descHint') }}</span></label>
+          <textarea v-model="form.desc" class="form-textarea" :placeholder="t('task.form.descPlaceholder')" />
         </div>
 
         <div class="form-row">
           <div class="form-group">
-            <label>执行模式</label>
+            <label>{{ t('task.form.execModeLabel') }}</label>
             <select v-model="form.execMode" class="form-select">
-              <option>全自动执行</option>
-              <option>逐步确认</option>
-              <option>仅规划不执行</option>
+              <option v-for="opt in execModeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
           <div class="form-group">
-            <label>输出格式</label>
+            <label>{{ t('task.form.outputFormatLabel') }}</label>
             <select v-model="form.outputFormat" class="form-select">
-              <option>Markdown 文档</option>
-              <option>PDF 报告</option>
-              <option>PPT 演示</option>
-              <option>Excel 表格</option>
+              <option v-for="opt in outputFormatOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
         </div>
 
         <div class="form-actions">
-          <button class="btn btn-secondary" type="button">保存草稿</button>
+          <button class="btn btn-secondary" type="button">{{ t('task.saveDraft') }}</button>
           <button class="btn btn-primary" type="button" :disabled="submitting" @click="launch">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-            <span>{{ submitting ? "启动中…" : "启动任务" }}</span>
+            <span>{{ submitting ? t('task.launching') : t('task.launch') }}</span>
           </button>
         </div>
       </div>

@@ -37,3 +37,15 @@ if (w.__MICRO_APP_ENVIRONMENT__) {
 } else {
   mount();
 }
+
+// Chrome 4K 高 DPI 首帧布局竞态修复：core 在 iframe 内运行，iframe 文档是独立
+// 渲染上下文，DPI 竞态可能在 iframe 内独立发生（shell 侧也同步处理）。mount 后
+// 延迟两帧（首帧合成 + DPI 校正完成）触发重排，让 .view.active 用正确尺寸布局。
+// 对 Edge/标准 DPI 无副作用。仅独立运行时需要（iframe 模式由 shell 侧 resize 传递）。
+if (!w.__MICRO_APP_ENVIRONMENT__ && typeof window !== "undefined") {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+  });
+}

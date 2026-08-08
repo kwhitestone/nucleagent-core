@@ -8,8 +8,9 @@
  * 替代旧 Workbench.vue：去掉自带的品牌头部与侧栏（chrome 已上移到壳），
  * 仅保留内容。创建对话的逻辑沿用 useConversationStore。
  */
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { ApiError } from "@/api/http";
 import { useConversationStore } from "@/store/conversation";
 import { toast } from "@/composables/useToast";
@@ -17,22 +18,31 @@ import type { ConversationMode } from "@/api/types";
 
 const router = useRouter();
 const store = useConversationStore();
+const { t } = useI18n();
 
 const input = ref("");
 const submitting = ref(false);
 
 /** 9 张建议卡。点击后把标题填入输入框。 */
-const suggestions = [
-  { delay: 1, title: "竞品分析", desc: "自动收集数据生成报告", icon: "check", bg: "var(--teal-50)", color: "var(--teal-600)" },
-  { delay: 2, title: "演示文稿", desc: "从大纲到 PPT 一键生成", icon: "ppt", bg: "#fef3c7", color: "#d97706" },
-  { delay: 3, title: "自由对话", desc: "随时 brainstorm 或问答", icon: "chat", bg: "#e0e7ff", color: "var(--indigo-500)" },
-  { delay: 4, title: "视频生成", desc: "文字描述生成短视频", icon: "video", bg: "#ffe4e6", color: "#e11d48" },
-  { delay: 5, title: "音乐创作", desc: "AI 辅助编曲与生成", icon: "music", bg: "#ede9fe", color: "#7c3aed" },
-  { delay: 6, title: "数据分析", desc: "上传数据自动可视化", icon: "chart", bg: "var(--teal-50)", color: "var(--teal-600)" },
-  { delay: 7, title: "文档撰写", desc: "自动生成长文和报告", icon: "doc", bg: "#e0e7ff", color: "var(--indigo-500)" },
-  { delay: 8, title: "流程自动化", desc: "连接 API 自动执行", icon: "clock", bg: "#fef3c7", color: "#d97706" },
-  { delay: 9, title: "知识库问答", desc: "基于文档智能问答", icon: "layers", bg: "var(--teal-50)", color: "var(--teal-600)" },
+const suggestionKeys = [
+  { key: "competitiveAnalysis", delay: 1, icon: "check", bg: "var(--teal-50)", color: "var(--teal-600)" },
+  { key: "presentation", delay: 2, icon: "ppt", bg: "#fef3c7", color: "#d97706" },
+  { key: "freeChat", delay: 3, icon: "chat", bg: "#e0e7ff", color: "var(--indigo-500)" },
+  { key: "videoGen", delay: 4, icon: "video", bg: "#ffe4e6", color: "#e11d48" },
+  { key: "musicCreation", delay: 5, icon: "music", bg: "#ede9fe", color: "#7c3aed" },
+  { key: "dataAnalysis", delay: 6, icon: "chart", bg: "var(--teal-50)", color: "var(--teal-600)" },
+  { key: "docWriting", delay: 7, icon: "doc", bg: "#e0e7ff", color: "var(--indigo-500)" },
+  { key: "workflowAutomation", delay: 8, icon: "clock", bg: "#fef3c7", color: "#d97706" },
+  { key: "knowledgeQA", delay: 9, icon: "layers", bg: "var(--teal-50)", color: "var(--teal-600)" },
 ] as const;
+
+const suggestions = computed(() =>
+  suggestionKeys.map((s) => ({
+    ...s,
+    title: t(`home.suggestions.${s.key}.title`),
+    desc: t(`home.suggestions.${s.key}.desc`),
+  })),
+);
 
 async function handleCreate(): Promise<void> {
   const text = input.value.trim();
@@ -44,7 +54,7 @@ async function handleCreate(): Promise<void> {
     input.value = "";
     router.push(`/c/${created.id}`);
   } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : "创建对话失败");
+    toast.error(error instanceof ApiError ? error.message : t("home.createFailed"));
   } finally {
     submitting.value = false;
   }
@@ -57,7 +67,7 @@ function fillSuggestion(title: string): void {
 onMounted(() => {
   // 首页挂载时拉一次历史，用于推给壳侧栏（桥接在 store 变化时 dispatch）。
   store.load().catch((e: unknown) => {
-    toast.error(e instanceof ApiError ? e.message : "加载历史失败");
+    toast.error(e instanceof ApiError ? e.message : t("home.loadHistoryFailed"));
   });
 });
 </script>
@@ -66,22 +76,22 @@ onMounted(() => {
   <div class="view active">
     <div class="home-view">
       <div class="home-hero">
-        <div class="home-greeting">NucleAgent</div>
-        <h1 class="home-title">今天想<em>创造</em>什么？</h1>
-        <p class="home-subtitle">NucleAgent 是你的 AI 工作伙伴。描述你的需求，它来规划、执行、交付。</p>
+        <div class="home-greeting">{{ t('home.greeting') }}</div>
+        <h1 class="home-title" v-html="t('home.title')"></h1>
+        <p class="home-subtitle">{{ t('home.subtitle') }}</p>
 
         <div class="home-composer">
           <textarea
             v-model="input"
-            placeholder="描述你的任务，比如「帮我写一份关于 AI Agent 市场的竞品分析」..."
+            :placeholder="t('home.inputPlaceholder')"
             :disabled="submitting"
             @keydown.enter.exact.prevent="handleCreate"
           />
           <div class="composer-actions">
-            <button class="composer-btn" title="附件" type="button">
+            <button class="composer-btn" :title="t('common.attachment')" type="button">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
             </button>
-            <button class="composer-btn send" title="发送" type="button" :disabled="submitting || !input.trim()" @click="handleCreate">
+            <button class="composer-btn send" :title="t('common.send')" type="button" :disabled="submitting || !input.trim()" @click="handleCreate">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
             </button>
           </div>
