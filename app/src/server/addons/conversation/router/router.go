@@ -25,7 +25,8 @@ func RegisterRoutes(api huma.API) {
 	registerGet(api)
 	registerDelete(api)
 	registerMessages(api)
-	registerStream(api) // SSE
+	registerStream(api)   // SSE
+	registerFollowUp(api) // 多轮对话追加消息
 	registerCancel(api)
 }
 
@@ -248,6 +249,59 @@ func registerStream(api huma.API) {
 				serveSSE(hctx, convID, afterID)
 			},
 		}, nil
+	})
+}
+
+// ---- FollowUp ----
+
+// FollowUpInput 追加消息请求（多轮对话）。
+type FollowUpInput struct {
+	ID   string `path:"id"`
+	Body struct {
+		Input string `json:"input" maxLength:"8192"`
+	}
+}
+
+// FollowUpOutput 追加消息响应。
+type FollowUpOutput struct {
+	Body struct {
+		Code    int                `json:"code" example:"0"`
+		Message string             `json:"message" example:"success"`
+		Data    *model.Conversation `json:"data"`
+	}
+}
+
+func registerFollowUp(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "conversationFollowUp",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/addons/conversation/{id}/follow-up",
+		Summary:     "追加消息（多轮对话）",
+		Description: "在已有对话上追加用户消息并重新调度执行",
+		Tags:        []string{"Conversation"},
+		Security:    []map[string][]string{{"AuthTokenAuth": {}}},
+	}, func(ctx context.Context, input *FollowUpInput) (*FollowUpOutput, error) {
+		if input.Body.Input == "" {
+			return nil, huma.NewError(http.StatusBadRequest, "input 不能为空")
+		}
+		// 校验归属（防 IDOR）。
+		conv, err := loadOwnedConversation(ctx, input.ID)
+		if err != nil {
+			return nil, err
+		}
+		if conv.Status == "executing" {
+			return nil, huma.NewError(http.StatusConflict, "对话正在执行中，请等待完成或取消后再追加")
+		}
+		if err := svc.Default.FollowUp(ctx, conv, input.Body.Input); err != nil {
+			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
+		}
+		// 重新加载返回最新状态。
+		conv, _ = loadOwnedConversation(ctx, input.ID)
+		resp := &FollowUpOutput{}
+		resp.Body.Code = 0
+		resp.Body.Message = "ok"
+		resp.Body.Data = conv
+		return resp, nil
 	})
 }
 

@@ -104,6 +104,36 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 	return conv, nil
 }
 
+// FollowUp 在已有对话上追加用户消息并重新调度执行（多轮对话）。
+//
+// 与 CreateAndExecute 的区别：不新建 conversation，只追加 user message，
+// 然后复用 dispatch 重新下发 a2a_request。status 回到 executing。
+func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input string) error {
+	db := global.PRISM_DB
+
+	// 1. 写 user message。
+	userMsg := &model.Message{
+		ConversationID: conv.ID,
+		SenderType:     model.SenderTypeUser,
+		SenderName:     "user",
+		MsgType:        model.MsgTypeText,
+		Content:        input,
+	}
+	if err := db.Create(userMsg).Error; err != nil {
+		return err
+	}
+	stream.Default.PublishCreated(conv.ID, userMsg)
+
+	// 2. 状态回到 executing，清掉完成时间。
+	db.Model(&model.Conversation{}).Where("id = ?", conv.ID).
+		Updates(map[string]any{"status": "executing", "completed_at": nil})
+
+	// 3. 异步调度执行（不阻塞 HTTP 响应）。
+	go s.dispatch(context.Background(), conv, input)
+
+	return nil
+}
+
 // dispatch 签发 TempLLMKey + 选 executor + 下发 a2a_request。
 func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input string) {
 	stepID := uuid.NewString()
@@ -410,12 +440,13 @@ func firstLine(s string, maxLen int) string {
 
 // CreateRequest 创建对话请求。
 type CreateRequest struct {
-	Mode       string `json:"mode" required:"true"`
-	Input      string `json:"input" required:"true"`
-	ProviderID *uint  `json:"providerId,omitempty"`
-	Model      string `json:"model,omitempty"`
-	AgentID    *uint  `json:"agentId,omitempty"`
-	ProjectID  *uint  `json:"projectId,omitempty"`
+	Mode       string         `json:"mode" required:"true"`
+	Input      string         `json:"input" required:"true"`
+	ProviderID *uint          `json:"providerId,omitempty"`
+	Model      string         `json:"model,omitempty"`
+	AgentID    *uint          `json:"agentId,omitempty"`
+	ProjectID  *uint          `json:"projectId,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 // 确保实现 executorreg.Handler。
