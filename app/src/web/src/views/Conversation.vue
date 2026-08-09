@@ -31,8 +31,7 @@ const followUp = ref("");
 const sending = ref(false);
 
 /** 显示用户消息（text）、流式回复（streaming）、最终回复（result）、工具调用（tool_call）。
- *  streaming/result 按轮次去重：同轮 result 存在则跳过 streaming。
- *  tool_call 实时显示 agent 在做什么（"正在查天气"等），用紧凑样式。 */
+ *  streaming/result 按轮次去重；tool_call 只显示有内容的（过滤空的 start/done 对里的空条）。 */
 const visibleMessages = computed(() => {
   const resultDelegations = new Set(
     messages.value
@@ -41,7 +40,11 @@ const visibleMessages = computed(() => {
   );
   return messages.value.filter((m) => {
     if (m.msgType === "text" || m.msgType === "result") return true;
-    if (m.msgType === "tool_call") return true;
+    if (m.msgType === "tool_call") {
+      // 只显示有实质内容的 tool_call（"done" 有内容，空的 start 过滤掉）
+      // 成对的 start/complete 里，start 的 content 是空，complete 的是 "done"
+      return (m.content || "").trim() !== "";
+    }
     if (m.msgType === "streaming") {
       const del = m.metadata?.delegation_id as string;
       if (del && resultDelegations.has(del)) return false;
