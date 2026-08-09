@@ -183,6 +183,24 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 	}
 
 	// 构造 a2a_request。
+	// 拉对话历史消息，放进 Context（让 executor 无状态，容器可重建后从 core 恢复）。
+	var history []model.Message
+	global.PRISM_DB.Where("conversation_id = ? AND msg_type IN ?", conv.ID,
+		[]string{"text", "result"}).Order("id ASC").Find(&history)
+	type histMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	hist := make([]histMsg, 0, len(history))
+	for _, m := range history {
+		role := "user"
+		if m.SenderType != "user" {
+			role = "assistant"
+		}
+		hist = append(hist, histMsg{Role: role, Content: m.Content})
+	}
+	histJSON, _ := json.Marshal(hist)
+
 	execReq := a2a.ExecutionRequest{
 		ConversationID: conv.ID,
 		StepID:         stepID,
@@ -190,6 +208,7 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 		ProviderID:     conv.ProviderID,
 		Model:          conv.Model,
 		Input:          input,
+		Context:        histJSON, // 对话历史（executor 注入 hermes session）
 		Headers: map[string]string{
 			llm.KeyHeader: tempKey.Key,
 		},
