@@ -32,6 +32,15 @@ async function scrollToBottom(): Promise<void> {
   if (el) el.scrollTop = el.scrollHeight;
 }
 
+/** 格式化消息时间（精确到秒）：2026-08-09 12:34:56 */
+function formatTime(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 // 消息列表变化时自动滚到底（SSE 推送的 agent 消息异步到达）。
 watch(
   () => messages.value.length,
@@ -138,7 +147,10 @@ void streamingId;
             <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" /><path d="M12 22V12" /><path d="M4 7l8 5 8-5" /></svg>
           </div>
           <div class="message-content">
-            <div class="message-author">{{ m.senderType === "user" ? t('conversation.you') : t('home.greeting') }}</div>
+            <div class="message-header">
+              <span class="message-author">{{ m.senderType === "user" ? t('conversation.you') : t('home.greeting') }}</span>
+              <span v-if="m.createdAt" class="message-time">{{ formatTime(m.createdAt) }}</span>
+            </div>
             <div class="message-bubble" v-html="m.content || ''" />
           </div>
         </div>
@@ -212,7 +224,10 @@ void streamingId;
 
 .message-content { flex: 1; min-width: 0; }
 
-.message-author { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.message-author { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+
+.message-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.message-time { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 
 .message-bubble { font-size: 14px; color: var(--slate-700); line-height: 1.65; }
 .message-bubble p { margin-bottom: 8px; }
