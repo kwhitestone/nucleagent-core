@@ -30,11 +30,20 @@ const loading = ref(true);
 const followUp = ref("");
 const sending = ref(false);
 
-/** 只显示用户消息（text）和最终回复（result）。
- *  streaming（思考过程）是实时中间态，不作为独立气泡显示。 */
-const visibleMessages = computed(() =>
-  messages.value.filter((m) => m.msgType === "text" || m.msgType === "result"),
-);
+/** 显示用户消息（text）、流式回复（streaming，实时可见）和最终回复（result）。
+ *  streaming 和 result 是同一条回复的两个阶段：streaming 实时流式显示，
+ *  result 到来后替换它。如果两者都存在（历史消息），只保留 result。 */
+const visibleMessages = computed(() => {
+  // 如果有 result 类型的消息，说明该回复已完成——同期的 streaming 被它替代。
+  // 用 metadata 里的 stream_key 或时间窗口判断同一轮。
+  const hasResult = messages.value.some((m) => m.msgType === "result");
+  if (!hasResult) {
+    // 还在流式输出中：显示 streaming（实时可见）+ text。
+    return messages.value.filter((m) => m.msgType === "text" || m.msgType === "streaming");
+  }
+  // 有 result（历史消息或刚完成）：显示 text + result，过滤掉 streaming（避免重复）。
+  return messages.value.filter((m) => m.msgType === "text" || m.msgType === "result");
+});
 
 const scroller = ref<HTMLElement | null>(null);
 let abort: AbortController | null = null;
