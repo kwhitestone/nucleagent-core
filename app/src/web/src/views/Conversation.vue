@@ -30,12 +30,10 @@ const loading = ref(true);
 const followUp = ref("");
 const sending = ref(false);
 
-/** 显示用户消息（text）和回复消息。
- *  每轮回复中：streaming 是实时流式（可见），result 是最终版。
- *  如果同一轮的 result 已存在，跳过该轮的 streaming（避免重复）。
- *  通过 metadata 的 delegation_id 判断同一轮；没有则都显示。 */
+/** 显示用户消息（text）、流式回复（streaming）、最终回复（result）、工具调用（tool_call）。
+ *  streaming/result 按轮次去重：同轮 result 存在则跳过 streaming。
+ *  tool_call 实时显示 agent 在做什么（"正在查天气"等），用紧凑样式。 */
 const visibleMessages = computed(() => {
-  // 收集所有有 result 的轮次 delegation_id
   const resultDelegations = new Set(
     messages.value
       .filter((m) => m.msgType === "result" && m.metadata?.delegation_id)
@@ -43,11 +41,11 @@ const visibleMessages = computed(() => {
   );
   return messages.value.filter((m) => {
     if (m.msgType === "text" || m.msgType === "result") return true;
+    if (m.msgType === "tool_call") return true;
     if (m.msgType === "streaming") {
-      // 如果同轮的 result 已存在，跳过 streaming（避免重复）
       const del = m.metadata?.delegation_id as string;
       if (del && resultDelegations.has(del)) return false;
-      return true; // 流式输出中，显示
+      return true;
     }
     return false;
   });
@@ -168,12 +166,15 @@ void streamingId;
       <div ref="scroller" class="chat-messages">
         <p v-if="!loading && visibleMessages.length === 0" class="chat-empty">{{ t('conversation.empty') }}</p>
 
-        <div
-          v-for="m in visibleMessages"
-          :key="m.id"
-          class="message"
-          :class="m.senderType === 'user' ? 'user' : 'assistant'"
-        >
+        <template v-for="m in visibleMessages" :key="m.id">
+          <!-- tool_call：紧凑工具标签条（显示 agent 正在做什么） -->
+          <div v-if="m.msgType === 'tool_call'" class="tool-tag">
+            <span class="tool-icon">🔧</span>
+            <span class="tool-name">{{ m.senderName }}</span>
+            <span class="tool-detail">{{ m.content || '...' }}</span>
+          </div>
+          <!-- 正常消息气泡 -->
+          <div v-else class="message" :class="m.senderType === 'user' ? 'user' : 'assistant'">
           <div class="message-avatar">
             <template v-if="m.senderType === 'user'">{{ t('conversation.you') }}</template>
             <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" /><path d="M12 22V12" /><path d="M4 7l8 5 8-5" /></svg>
@@ -185,7 +186,8 @@ void streamingId;
             </div>
             <div class="message-bubble" v-html="renderMarkdown(m.content || '')" />
           </div>
-        </div>
+          </div>
+        </template>
       </div>
 
       <div class="chat-composer-wrap">
@@ -228,6 +230,18 @@ void streamingId;
 }
 
 .chat-empty { color: var(--text-tertiary); text-align: center; padding-top: 40px; }
+
+/* 工具调用标签条（紧凑显示 agent 正在做什么） */
+.tool-tag {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 12px; margin-left: 48px;
+  font-size: 12px; color: var(--text-tertiary);
+  background: var(--bg-hover); border-radius: var(--r-sm);
+  width: fit-content; max-width: 80%;
+}
+.tool-icon { font-size: 12px; }
+.tool-name { font-weight: 600; color: var(--indigo-600); }
+.tool-detail { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .message {
   display: flex; gap: 14px; max-width: 100%;
