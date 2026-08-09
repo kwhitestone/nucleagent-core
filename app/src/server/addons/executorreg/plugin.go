@@ -11,6 +11,8 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"go.uber.org/zap"
 
+	"nucleagent-core/addons/llmproxy"
+
 	"whitestone.top/prism-fusion/global"
 	"whitestone.top/prism-fusion/plugin"
 )
@@ -39,10 +41,12 @@ func (p *ExecutorRegPlugin) Priority() int { return 25 }
 
 func (p *ExecutorRegPlugin) RoutePrefix() string { return "/api/v1/addons/s2s" }
 
-// RegisterRoutes 注册 HTTP 注册端点 + WS 升级端点。
+// RegisterRoutes 注册 HTTP 注册端点 + WS 升级端点 + LLM key 签发端点。
 func (p *ExecutorRegPlugin) RegisterRoutes(api huma.API) {
 	// HTTP 注册端点（huma）。
 	registerHTTPRegister(api)
+	// S2S LLM key 签发端点（executor 启动时换服务级长效 key）。
+	registerHTTPLLMKey(api)
 
 	// WS 升级端点（huma StreamResponse + humagin.Unwrap 拿 gin context）。
 	huma.Register(api, huma.Operation{
@@ -100,6 +104,79 @@ func registerHTTPRegister(api huma.API) {
 		resp.Body.Code = 0
 		resp.Body.Message = "registered"
 		resp.Body.Data = &reg
+		return resp, nil
+	})
+}
+
+// ---- S2S LLM key 签发（executor 服务级长效 key）----
+
+// LLMKeyInput S2S LLM key 请求（X-Executor-Token 鉴权）。
+type LLMKeyInput struct {
+	XExecutorToken string `header:"X-Executor-Token" doc:"S2S 共享令牌"`
+	Body           LLMKeyRequest
+}
+
+// LLMKeyRequest executor 请求服务级长效 LLM proxy key 的 body。
+type LLMKeyRequest struct {
+	ProviderID uint   `json:"providerId" required:"true"` // DB 里的 provider id
+	Model      string `json:"model" required:"true"`      // 模型名（如 glm-5.2）
+}
+
+// LLMKeyOutput S2S LLM key 响应。
+type LLMKeyOutput struct {
+	Body struct {
+		Code    int             `json:"code" example:"0"`
+		Message string          `json:"message" example:"ok"`
+		Data    *LLMKeyResponse `json:"data"`
+	} `json:"body"`
+}
+
+// LLMKeyResponse 签发出的服务级 key + proxy 地址。
+type LLMKeyResponse struct {
+	Key          string `json:"key"`          // llmk_ 前缀临时 key（长效，proxy 滑动续期）
+	ProxyBaseURL string `json:"proxyBaseUrl"` // LLM proxy base（executor 拼 /v1/chat/completions）
+	Model        string `json:"model"`
+	ExpiresIn    int    `json:"expiresIn"` // 秒
+}
+
+// executorServiceSession executor 服务级 key 的固定 sessionId（跨对话复用，TTL 滑动）。
+const executorServiceSession = "nucleagent-executor"
+
+// registerHTTPLLMKey 注册 POST /api/v1/addons/s2s/executor/llm-key。
+// executor 启动时调一次，拿一个长效 key 写进 hermes managed config，常驻 hermes 缓存复用。
+func registerHTTPLLMKey(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "s2sExecutorLLMKey",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/addons/s2s/executor/llm-key",
+		Summary:     "Executor LLM key（S2S）",
+		Description: "executor 持 ExecutorToken 换取服务级长效 LLM proxy key（hermes 常驻缓存用）",
+		Tags:        []string{"S2S"},
+	}, func(ctx context.Context, input *LLMKeyInput) (*LLMKeyOutput, error) {
+		executorToken := global.PRISM_VP.GetString("nucleagent.executor-token")
+		if executorToken != "" && input.XExecutorToken != executorToken {
+			return nil, huma.NewError(http.StatusUnauthorized, "invalid executor token")
+		}
+		// 签发/复用 session 级长效 key（Redis 持久化时跨 core 重启有效）。
+		tk := llmproxy.Default.GetOrIssueForSession(executorServiceSession, 0, input.Body.ProviderID, input.Body.Model)
+		// proxy base = core public-url + /api/llm-proxy/v1
+		base := global.PRISM_VP.GetString("nucleagent.public-url")
+		if base == "" {
+			addr := global.PRISM_CONFIG.System.Addr
+			if addr == 0 {
+				addr = 26680
+			}
+			base = "http://localhost:" + strconv.Itoa(addr)
+		}
+		resp := &LLMKeyOutput{}
+		resp.Body.Code = 0
+		resp.Body.Message = "ok"
+		resp.Body.Data = &LLMKeyResponse{
+			Key:          tk.Key,
+			ProxyBaseURL: strings.TrimRight(base, "/") + "/api/llm-proxy/v1",
+			Model:        tk.Model,
+			ExpiresIn:    int(time.Until(tk.ExpiresAt).Seconds()),
+		}
 		return resp, nil
 	})
 }

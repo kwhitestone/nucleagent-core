@@ -70,6 +70,9 @@ func handleProxy(c *gin.Context) {
 		})
 		return
 	}
+	// 活跃 key 滑动续期（对齐 agentia RefreshTTL）：常驻 hermes 的服务级 key
+	// 每次成功请求都刷新 TTL，永不过期。
+	Default.RefreshTTL(tk.Key)
 
 	// 2. 解析目标 URL。
 	target, err := url.Parse(rp.BaseURL)

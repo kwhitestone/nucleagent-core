@@ -60,9 +60,15 @@ func expandEnv(s string) string {
 func main() {
 	initializeSystem()
 
-	// 启动 TempLLMKey 定期清理（防内存累积）。
+	// 启动 TempLLMKey 存储：Redis 可达走 Redis（重启/多实例不丢 key），否则内存兜底。
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	redisAddr := global.PRISM_VP.GetString("nucleagent.redis-addr")
+	if llmproxy.InitDefault(redisAddr) {
+		global.PRISM_LOG.Info("TempLLMKey store: redis", zap.String("addr", redisAddr))
+	} else {
+		global.PRISM_LOG.Info("TempLLMKey store: memory (redis unavailable or unconfigured)")
+	}
 	llmproxy.Default.StartCleanupLoop(rootCtx)
 
 	// 运行 HTTP 服务器（阻塞）。
