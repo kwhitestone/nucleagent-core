@@ -7,11 +7,20 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 import { ApiError } from "@/api/http";
 import { followUp as followUpApi, getMessages } from "@/api/conversation";
 import type { Message } from "@/api/types";
 import { useStreamConversation } from "@/composables/useStreamConversation";
 import { toast } from "@/composables/useToast";
+
+/** Markdown → 安全 HTML（防 XSS）。 */
+function renderMarkdown(text: string): string {
+  if (!text) return "";
+  const html = marked.parse(text, { breaks: true, async: false }) as string;
+  return DOMPurify.sanitize(html);
+}
 
 const props = defineProps<{ id: string }>();
 const { t } = useI18n();
@@ -21,10 +30,10 @@ const loading = ref(true);
 const followUp = ref("");
 const sending = ref(false);
 
-/** 只显示实质消息：text（用户）、result（最终回复）、streaming（思考过程）。
- *  过滤掉 tool_call（tool.start/complete 的空/"done" 气泡）、plan、error。 */
+/** 只显示用户消息（text）和最终回复（result）。
+ *  streaming（思考过程）是实时中间态，不作为独立气泡显示。 */
 const visibleMessages = computed(() =>
-  messages.value.filter((m) => m.msgType === "text" || m.msgType === "result" || m.msgType === "streaming"),
+  messages.value.filter((m) => m.msgType === "text" || m.msgType === "result"),
 );
 
 const scroller = ref<HTMLElement | null>(null);
@@ -157,7 +166,7 @@ void streamingId;
               <span class="message-author">{{ m.senderType === "user" ? t('conversation.you') : t('home.greeting') }}</span>
               <span v-if="m.createdAt" class="message-time">{{ formatTime(m.createdAt) }}</span>
             </div>
-            <div class="message-bubble" v-html="m.content || ''" />
+            <div class="message-bubble" v-html="renderMarkdown(m.content || '')" />
           </div>
         </div>
       </div>
@@ -242,6 +251,24 @@ void streamingId;
   font-family: var(--font-mono); font-size: 12.5px;
   background: var(--grad-brand-soft);
   padding: 1px 6px; border-radius: 4px; color: var(--indigo-600);
+}
+.message-bubble pre {
+  background: #1e293b; color: #e2e8f0; border-radius: 8px;
+  padding: 12px 16px; overflow-x: auto; margin: 8px 0;
+}
+.message-bubble pre code {
+  background: none; color: inherit; padding: 0; font-size: 13px;
+}
+.message-bubble table {
+  border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px;
+}
+.message-bubble th, .message-bubble td {
+  border: 1px solid var(--border); padding: 6px 10px; text-align: left;
+}
+.message-bubble th { background: var(--bg-hover); font-weight: 600; }
+.message-bubble ul, .message-bubble ol { padding-left: 20px; margin: 6px 0; }
+.message-bubble h1, .message-bubble h2, .message-bubble h3 {
+  font-size: 15px; font-weight: 600; margin: 10px 0 6px;
 }
 
 .chat-composer-wrap {
