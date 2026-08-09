@@ -66,9 +66,10 @@ export function useStreamConversation(
    * 阻塞循环（broker channel 持续到连接断开），调用方不应 await 它来
    * 判断「执行完成」——完成仅表现为收到 msgType=result 的消息。
    */
-  async function consumeStream(signal: AbortSignal): Promise<void> {
+  async function consumeStream(signal: AbortSignal, overrideId?: string): Promise<void> {
+    const id = overrideId ?? conversationId;
     try {
-      for await (const ev of streamMessages(conversationId, signal)) {
+      for await (const ev of streamMessages(id, signal)) {
         handleEvent(ev);
       }
     } catch (error) {

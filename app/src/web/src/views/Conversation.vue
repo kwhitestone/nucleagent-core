@@ -95,6 +95,24 @@ onMounted(async () => {
   void consumeStream(abort.signal);
 });
 
+// 路由在同组件内切换（/chat/75 → /chat/73）时 onMounted 不再触发，
+// 需 watch props.id 重新加载消息 + 重建 SSE 流，否则主区域停在旧对话内容。
+watch(
+  () => props.id,
+  async (newId, oldId) => {
+    if (newId === oldId) return;
+    // 中断旧 SSE 流。
+    abort?.abort();
+    messages.value = [];
+    sawStreamingThisCycle = false;
+    sending.value = false;
+    // 重新加载新对话消息 + 重建 SSE（传新 id）。
+    await loadHistory();
+    abort = new AbortController();
+    void consumeStream(abort.signal, newId);
+  },
+);
+
 onUnmounted(() => {
   abort?.abort();
 });
