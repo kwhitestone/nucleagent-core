@@ -5,7 +5,7 @@
  * 消息列表（用户/助手气泡）+ 输入框工具栏。
  * 替代旧版：去掉自带侧栏与头部（chrome 上移到壳），换上设计稿的气泡样式。
  */
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ApiError } from "@/api/http";
 import { followUp as followUpApi, getMessages } from "@/api/conversation";
@@ -20,6 +20,12 @@ const messages = ref<Message[]>([]);
 const loading = ref(true);
 const followUp = ref("");
 const sending = ref(false);
+
+/** 只显示实质消息：text（用户）、result（最终回复）、streaming（思考过程）。
+ *  过滤掉 tool_call（tool.start/complete 的空/"done" 气泡）、plan、error。 */
+const visibleMessages = computed(() =>
+  messages.value.filter((m) => m.msgType === "text" || m.msgType === "result" || m.msgType === "streaming"),
+);
 
 const scroller = ref<HTMLElement | null>(null);
 let abort: AbortController | null = null;
@@ -43,7 +49,7 @@ function formatTime(iso: string): string {
 
 // 消息列表变化时自动滚到底（SSE 推送的 agent 消息异步到达）。
 watch(
-  () => messages.value.length,
+  () => visibleMessages.value.length,
   () => { void scrollToBottom(); },
 );
 
@@ -134,10 +140,10 @@ void streamingId;
   <div class="view active view--scroll-hidden">
     <div class="chat-view">
       <div ref="scroller" class="chat-messages">
-        <p v-if="!loading && messages.length === 0" class="chat-empty">{{ t('conversation.empty') }}</p>
+        <p v-if="!loading && visibleMessages.length === 0" class="chat-empty">{{ t('conversation.empty') }}</p>
 
         <div
-          v-for="m in messages"
+          v-for="m in visibleMessages"
           :key="m.id"
           class="message"
           :class="m.senderType === 'user' ? 'user' : 'assistant'"
