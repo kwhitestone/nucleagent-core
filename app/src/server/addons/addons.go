@@ -14,4 +14,10 @@ import (
 	_ "nucleagent-core/addons/agent"
 	// Skill 只读：GET /api/v1/addons/skill
 	_ "nucleagent-core/addons/skill"
+	// Provider CRUD：GET/POST/PATCH/DELETE /api/v1/addons/provider
+	_ "nucleagent-core/addons/provider"
+	// Project CRUD：GET/POST/PATCH/DELETE /api/v1/addons/project（按 user_id 隔离）
+	_ "nucleagent-core/addons/project"
+	// Tool CRUD：GET/POST/PATCH/DELETE /api/v1/addons/tool
+	_ "nucleagent-core/addons/tool"
 )

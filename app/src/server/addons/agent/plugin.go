@@ -1,16 +1,17 @@
-// Package agent Agent 模板只读插件。
+// Package agent Agent 模板（只读）+ Agent 实例（CRUD）插件。
 //
-// 暴露 GET /api/v1/addons/agent/templates，供前端「创作」「任务」视图拉取可用
-// Agent 模板。表由 coredata 插件 AutoMigrate + seed，这里只读不写。
+// 暴露：
+//   - GET /api/v1/addons/agent/templates      列出模板（全局只读）
+//   - POST/GET/GET/PATCH/DELETE .../instances  雇佣/列出/详情/更新/解雇 Agent（按 user_id 隔离）
 //
-// 为什么单独成包：前端 api/agent.ts 早已在调用此端点，但后端从未实现（重构时
-// 发现的缺口）。只补这一个只读端点即可解锁新视图，instance/CRUD 等留待后续。
+// 模板表由 coredata 插件 AutoMigrate + seed。实例表同由 coredata 迁移。
 package agent
 
 import (
 	agentRouter "nucleagent-core/addons/agent/router"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gin-gonic/gin"
 	"whitestone.top/prism-fusion/global"
 	"whitestone.top/prism-fusion/plugin"
 )
@@ -46,4 +47,10 @@ func (p *AgentPlugin) RegisterRoutes(api huma.API) {
 // Models 表由 coredata 统一 AutoMigrate，这里返回 nil 避免重复迁移。
 func (p *AgentPlugin) Models() []interface{} {
 	return nil
+}
+
+// Middlewares 作用域中间件：把 gin context 的 user_id 桥接到 request context，
+// 供实例 CRUD handler 读取（模板列表是全局只读，忽略 user_id）。
+func (p *AgentPlugin) Middlewares() []gin.HandlerFunc {
+	return []gin.HandlerFunc{BridgeMiddleware()}
 }
