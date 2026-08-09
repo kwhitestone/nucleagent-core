@@ -30,19 +30,27 @@ const loading = ref(true);
 const followUp = ref("");
 const sending = ref(false);
 
-/** 显示用户消息（text）、流式回复（streaming，实时可见）和最终回复（result）。
- *  streaming 和 result 是同一条回复的两个阶段：streaming 实时流式显示，
- *  result 到来后替换它。如果两者都存在（历史消息），只保留 result。 */
+/** 显示用户消息（text）和回复消息。
+ *  每轮回复中：streaming 是实时流式（可见），result 是最终版。
+ *  如果同一轮的 result 已存在，跳过该轮的 streaming（避免重复）。
+ *  通过 metadata 的 delegation_id 判断同一轮；没有则都显示。 */
 const visibleMessages = computed(() => {
-  // 如果有 result 类型的消息，说明该回复已完成——同期的 streaming 被它替代。
-  // 用 metadata 里的 stream_key 或时间窗口判断同一轮。
-  const hasResult = messages.value.some((m) => m.msgType === "result");
-  if (!hasResult) {
-    // 还在流式输出中：显示 streaming（实时可见）+ text。
-    return messages.value.filter((m) => m.msgType === "text" || m.msgType === "streaming");
-  }
-  // 有 result（历史消息或刚完成）：显示 text + result，过滤掉 streaming（避免重复）。
-  return messages.value.filter((m) => m.msgType === "text" || m.msgType === "result");
+  // 收集所有有 result 的轮次 delegation_id
+  const resultDelegations = new Set(
+    messages.value
+      .filter((m) => m.msgType === "result" && m.metadata?.delegation_id)
+      .map((m) => m.metadata?.delegation_id as string),
+  );
+  return messages.value.filter((m) => {
+    if (m.msgType === "text" || m.msgType === "result") return true;
+    if (m.msgType === "streaming") {
+      // 如果同轮的 result 已存在，跳过 streaming（避免重复）
+      const del = m.metadata?.delegation_id as string;
+      if (del && resultDelegations.has(del)) return false;
+      return true; // 流式输出中，显示
+    }
+    return false;
+  });
 });
 
 const scroller = ref<HTMLElement | null>(null);
