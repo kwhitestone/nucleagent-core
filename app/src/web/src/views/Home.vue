@@ -14,7 +14,9 @@ import { useI18n } from "vue-i18n";
 import { ApiError } from "@/api/http";
 import { useConversationStore } from "@/store/conversation";
 import { toast } from "@/composables/useToast";
-import type { ConversationMode } from "@/api/types";
+import AttachmentPicker from "@/components/AttachmentPicker.vue";
+import AttachmentChips from "@/components/AttachmentChips.vue";
+import type { ConversationMode, MessageAttachment } from "@/api/types";
 
 const router = useRouter();
 const store = useConversationStore();
@@ -22,6 +24,8 @@ const { t } = useI18n();
 
 const input = ref("");
 const submitting = ref(false);
+/** 待发送附件。选中即已上传到 storage，这里持有的只是引用（fileId 等）。 */
+const attachments = ref<MessageAttachment[]>([]);
 
 /** 9 张建议卡。点击后把标题填入输入框。 */
 const suggestionKeys = [
@@ -50,8 +54,15 @@ async function handleCreate(): Promise<void> {
   submitting.value = true;
   try {
     const mode: ConversationMode = "a2a_agent";
-    const created = await store.create({ mode, input: text, model: "" });
+    const created = await store.create({
+      mode,
+      input: text,
+      model: "",
+      // 只传引用，字节早在选中时就直传给 storage 了。
+      attachments: attachments.value.map((a) => ({ fileId: a.fileId, name: a.name })),
+    });
     input.value = "";
+    attachments.value = [];
     router.push(`/c/${created.id}`);
   } catch (error) {
     toast.error(error instanceof ApiError ? error.message : t("home.createFailed"));
@@ -88,14 +99,18 @@ onMounted(() => {
             @keydown.enter.exact.prevent="handleCreate"
           />
           <div class="composer-actions">
-            <button class="composer-btn" :title="t('common.attachment')" type="button">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
-            </button>
+            <AttachmentPicker v-model="attachments" :disabled="submitting" />
             <button class="composer-btn send" :title="t('common.send')" type="button" :disabled="submitting || !input.trim()" @click="handleCreate">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
             </button>
           </div>
         </div>
+
+        <AttachmentChips
+          :attachments="attachments"
+          removable
+          @remove="(id: string) => (attachments = attachments.filter((a) => a.fileId !== id))"
+        />
 
         <div class="suggestion-grid">
           <div

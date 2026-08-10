@@ -62,6 +62,28 @@ export type MessageType =
   | "tool_call"
   | "status";
 
+/**
+ * 消息附件。与后端 a2a.Attachment 同形（camelCase json tag）。
+ *
+ * 注意没有 url 字段：下载链接由后端按需签发（有效期 1800s），不随消息存储；
+ * 前端要下载时调 api/storage 的 getDownloadUrl 现取。
+ */
+export interface MessageAttachment {
+  fileId: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
+  sha256?: string;
+  /** 由后端按 mimeType 归一，前端只用它选图标。 */
+  kind?: "image" | "pdf" | "file";
+}
+
+/** 上传完成后回传给后端的附件引用（后端用 fileId 去 storage 核对真实元数据）。 */
+export interface AttachmentRef {
+  fileId: string;
+  name?: string;
+}
+
 /** POST /conversation body. */
 export interface CreateConversationRequest {
   mode: ConversationMode;
@@ -69,6 +91,8 @@ export interface CreateConversationRequest {
   model?: string;
   /** 暂存执行模式/输出格式等前端-only 元数据（后端暂未持久化，预留给未来字段）。 */
   metadata?: Record<string, unknown>;
+  /** 附件引用（先经 storage 上传拿到 fileId）。 */
+  attachments?: AttachmentRef[];
 }
 
 /** Agent template row (agent_templates table, GET /agent/templates item).
@@ -91,6 +115,50 @@ export interface AgentTemplate {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Provider row (providers table, GET /provider item)。
+ *
+ * ⚠️ 没有 apiKey 字段：后端 model.Provider 的 APIKey json tag 为 "-"，
+ * 列表/详情永不回传密钥（见 provider/router/router.go 顶部注释）。
+ * 前端只能「写入」新密钥，无法读回既有密钥——UI 必须据此设计
+ * （编辑时留空 = 不修改，而不是显示掩码后再提交）。
+ */
+export interface Provider {
+  id: number;
+  name: string;
+  config?: ProviderConfig;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Provider.config JSON —— 与后端 llmproxy.ProviderConfig 同形。 */
+export interface ProviderConfig {
+  baseUrl?: string;
+  /** openai / anthropic */
+  apiFormat?: string;
+  /** bearer / api_key */
+  authScheme?: string;
+  models?: string[];
+  [key: string]: unknown;
+}
+
+/** POST /provider body（apiKey 明文，后端用 MASTER_KEY 加密入库）。 */
+export interface CreateProviderRequest {
+  name: string;
+  apiKey: string;
+  config?: ProviderConfig;
+  isActive: boolean;
+}
+
+/** PATCH /provider/:id body —— 字段全可选；apiKey 省略/留空表示不修改。 */
+export interface UpdateProviderRequest {
+  name?: string;
+  apiKey?: string;
+  config?: ProviderConfig;
+  isActive?: boolean;
 }
 
 /** Skill row (skills table, GET /skill item). 后端返回 camelCase JSON。 */

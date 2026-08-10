@@ -1,5 +1,6 @@
 import http, { ApiError, apiBase, authHeaders } from "./http";
 import type {
+  AttachmentRef,
   Conversation,
   CreateConversationRequest,
   Message,
@@ -50,10 +51,12 @@ export async function getMessages(conversationId: number | string): Promise<Mess
 export async function followUp(
   conversationId: number | string,
   input: string,
+  attachments?: AttachmentRef[],
 ): Promise<Conversation> {
   const response = await http.post<Envelope<Conversation>>(
     `${BASE}/${conversationId}/follow-up`,
-    { input },
+    // 无附件时不带该字段，请求体与改动前逐字节一致。
+    attachments?.length ? { input, attachments } : { input },
   );
   return response.data?.data as Conversation;
 }

@@ -17,7 +17,9 @@ import { ApiError } from "@/api/http";
 import { listAgentTemplates } from "@/api/agent";
 import { useConversationStore } from "@/store/conversation";
 import { toast } from "@/composables/useToast";
-import type { AgentTemplate, ConversationMode } from "@/api/types";
+import AttachmentPicker from "@/components/AttachmentPicker.vue";
+import AttachmentChips from "@/components/AttachmentChips.vue";
+import type { AgentTemplate, ConversationMode, MessageAttachment } from "@/api/types";
 
 const router = useRouter();
 const store = useConversationStore();
@@ -78,6 +80,8 @@ onMounted(async () => {
 });
 
 const selected = ref(0);
+/** 任务附件（选中即已上传到 storage，这里持有引用）。 */
+const attachments = ref<MessageAttachment[]>([]);
 
 const form = reactive({
   name: "",
@@ -137,6 +141,7 @@ async function launch(): Promise<void> {
         outputFormat: form.outputFormat,
         taskName: name,
       },
+      attachments: attachments.value.map((a) => ({ fileId: a.fileId, name: a.name })),
     });
     router.push(`/c/${created.id}`);
   } catch (error) {
@@ -178,6 +183,18 @@ async function launch(): Promise<void> {
         <div class="form-group">
           <label>{{ t('task.form.descLabel') }} <span class="label-hint">{{ t('task.form.descHint') }}</span></label>
           <textarea v-model="form.desc" class="form-textarea" :placeholder="t('task.form.descPlaceholder')" />
+        </div>
+
+        <div class="form-group">
+          <label>{{ t('common.attachment') }}</label>
+          <div>
+            <AttachmentPicker v-model="attachments" :disabled="submitting" show-label />
+            <AttachmentChips
+              :attachments="attachments"
+              removable
+              @remove="(id: string) => (attachments = attachments.filter((a) => a.fileId !== id))"
+            />
+          </div>
         </div>
 
         <div class="form-row">

@@ -67,6 +67,13 @@ var Default = NewService()
 func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *CreateRequest) (*model.Conversation, error) {
 	db := global.PRISM_DB
 
+	// 0. 先核对附件再落任何库记录 —— 附件不合法就整个请求失败，
+	//    否则会留下一条引用了不存在文件的对话，用户以为传成功了。
+	atts, err := resolveAttachments(ctx, req.Attachments)
+	if err != nil {
+		return nil, err
+	}
+
 	// 1. 创建 conversation。
 	conv := &model.Conversation{
 		UserID:     userID,
@@ -85,13 +92,14 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 		return nil, fmt.Errorf("create conversation: %w", err)
 	}
 
-	// 2. 写 user message。
+	// 2. 写 user message（附件清单进 metadata，供后续轮次重建历史时带上）。
 	userMsg := &model.Message{
 		ConversationID: conv.ID,
 		SenderType:     model.SenderTypeUser,
 		SenderName:     "user",
 		MsgType:        model.MsgTypeText,
 		Content:        req.Input,
+		Metadata:       attachmentsToMetadata(atts),
 	}
 	if err := db.Create(userMsg).Error; err != nil {
 		return nil, err
@@ -99,7 +107,7 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 	stream.Default.PublishCreated(conv.ID, userMsg)
 
 	// 3. 异步调度执行（不阻塞 HTTP 响应）。
-	go s.dispatch(context.Background(), conv, req.Input)
+	go s.dispatch(context.Background(), conv, req.Input, atts)
 
 	return conv, nil
 }
@@ -108,16 +116,23 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 //
 // 与 CreateAndExecute 的区别：不新建 conversation，只追加 user message，
 // 然后复用 dispatch 重新下发 a2a_request。status 回到 executing。
-func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input string) error {
+func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input string, attachments []AttachmentInput) error {
 	db := global.PRISM_DB
 
-	// 1. 写 user message。
+	// 0. 先核对附件（同 CreateAndExecute：不合法则整个追问失败，不留半成品消息）。
+	atts, err := resolveAttachments(ctx, attachments)
+	if err != nil {
+		return err
+	}
+
+	// 1. 写 user message（附件清单进 metadata）。
 	userMsg := &model.Message{
 		ConversationID: conv.ID,
 		SenderType:     model.SenderTypeUser,
 		SenderName:     "user",
 		MsgType:        model.MsgTypeText,
 		Content:        input,
+		Metadata:       attachmentsToMetadata(atts),
 	}
 	if err := db.Create(userMsg).Error; err != nil {
 		return err
@@ -129,13 +144,16 @@ func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input 
 		Updates(map[string]any{"status": "executing", "completed_at": nil})
 
 	// 3. 异步调度执行（不阻塞 HTTP 响应）。
-	go s.dispatch(context.Background(), conv, input)
+	go s.dispatch(context.Background(), conv, input, atts)
 
 	return nil
 }
 
 // dispatch 签发 TempLLMKey + 选 executor + 下发 a2a_request。
-func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input string) {
+//
+// attachments 是**本轮**新上传的附件；历史轮次的附件在下面从各条 message 的
+// metadata 里重新读出，两者来源不同，不能混为一谈。
+func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input string, attachments []a2a.Attachment) {
 	stepID := uuid.NewString()
 	delegationID := uuid.NewString()
 	senderSlug := "agent"
@@ -187,19 +205,28 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 	var history []model.Message
 	global.PRISM_DB.Where("conversation_id = ? AND msg_type IN ?", conv.ID,
 		[]string{"text", "result"}).Order("id ASC").Find(&history)
-	type histMsg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	hist := make([]histMsg, 0, len(history))
+	hist := make([]a2a.HistoryMessage, 0, len(history))
 	for _, m := range history {
 		role := "user"
 		if m.SenderType != "user" {
 			role = "assistant"
 		}
-		hist = append(hist, histMsg{Role: role, Content: m.Content})
+		// 历史消息里的附件也要带上并重新签 URL，否则第 1 轮传的文件到第 2 轮
+		// 就从 agent 视野里消失了（hermes 侧 session 重建时按这份历史恢复）。
+		histAtts := attachmentsFromMetadata(m.Metadata)
+		signAttachments(ctx, histAtts)
+		hist = append(hist, a2a.HistoryMessage{
+			Role:        role,
+			Content:     m.Content,
+			Attachments: histAtts,
+		})
 	}
-	histJSON, _ := json.Marshal(hist)
+	// 对象形态（见 a2a.ExecutionContext）。executor 侧用 DecodeExecutionContext
+	// 兼容读取，故新老版本可以不同步部署。
+	histJSON, _ := json.Marshal(a2a.ExecutionContext{History: hist})
+
+	// 本轮附件现签现用（URL 有时效，不落库）。
+	signAttachments(ctx, attachments)
 
 	execReq := a2a.ExecutionRequest{
 		ConversationID: conv.ID,
@@ -209,6 +236,7 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 		Model:          conv.Model,
 		Input:          input,
 		Context:        histJSON, // 对话历史（executor 注入 hermes session）
+		Attachments:    attachments,
 		Headers: map[string]string{
 			llm.KeyHeader: tempKey.Key,
 		},
@@ -460,13 +488,14 @@ func firstLine(s string, maxLen int) string {
 
 // CreateRequest 创建对话请求。
 type CreateRequest struct {
-	Mode       string         `json:"mode" required:"true"`
-	Input      string         `json:"input" required:"true"`
-	ProviderID *uint          `json:"providerId,omitempty"`
-	Model      string         `json:"model,omitempty"`
-	AgentID    *uint          `json:"agentId,omitempty"`
-	ProjectID  *uint          `json:"projectId,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	Mode        string            `json:"mode" required:"true"`
+	Input       string            `json:"input" required:"true"`
+	ProviderID  *uint             `json:"providerId,omitempty"`
+	Model       string            `json:"model,omitempty"`
+	AgentID     *uint             `json:"agentId,omitempty"`
+	ProjectID   *uint             `json:"projectId,omitempty"`
+	Metadata    map[string]any    `json:"metadata,omitempty"`
+	Attachments []AttachmentInput `json:"attachments,omitempty" doc:"附件引用（先经 storage 上传拿到 fileId）"`
 }
 
 // 确保实现 executorreg.Handler。

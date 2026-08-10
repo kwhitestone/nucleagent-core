@@ -4,6 +4,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -65,6 +66,10 @@ func registerCreate(api huma.API) {
 		}
 		conv, err := svc.Default.CreateAndExecute(ctx, userID, &input.Body)
 		if err != nil {
+			// 附件不可用是客户端可修正的问题，与服务端故障区分开（同 follow-up）。
+			if errors.Is(err, svc.ErrInvalidAttachment) {
+				return nil, huma.NewError(http.StatusBadRequest, err.Error())
+			}
 			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
 		}
 		resp := &CreateOutput{}
@@ -258,7 +263,8 @@ func registerStream(api huma.API) {
 type FollowUpInput struct {
 	ID   string `path:"id"`
 	Body struct {
-		Input string `json:"input" maxLength:"8192"`
+		Input       string                `json:"input" maxLength:"8192"`
+		Attachments []svc.AttachmentInput `json:"attachments,omitempty" doc:"附件引用（先经 storage 上传拿到 fileId）"`
 	}
 }
 
@@ -292,7 +298,12 @@ func registerFollowUp(api huma.API) {
 		if conv.Status == "executing" {
 			return nil, huma.NewError(http.StatusConflict, "对话正在执行中，请等待完成或取消后再追加")
 		}
-		if err := svc.Default.FollowUp(ctx, conv, input.Body.Input); err != nil {
+		if err := svc.Default.FollowUp(ctx, conv, input.Body.Input, input.Body.Attachments); err != nil {
+			// 只有附件不可用才是客户端问题（引用了不存在/未完成的文件），
+			// 落 400 让用户知道可以重新上传；DB 之类的失败仍是 500。
+			if errors.Is(err, svc.ErrInvalidAttachment) {
+				return nil, huma.NewError(http.StatusBadRequest, err.Error())
+			}
 			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
 		}
 		// 重新加载返回最新状态。

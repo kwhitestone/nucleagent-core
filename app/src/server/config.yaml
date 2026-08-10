@@ -69,6 +69,9 @@ nucleagent:
   redis-addr: '${REDIS_ADDR:-localhost:6379}'
   executor-token: '${EXECUTOR_TOKEN}'   # S2S 校验 X-Executor-Token（与 executor 共享）
   public-url: '${NUCLEAGENT_PUBLIC_URL:-http://localhost:26680}'  # executor 回连 WS 用（不信任 Host 头）
+  # storage 服务地址（附件元数据查询 + 下载链接签发；core 不经手文件字节）。
+  # 留空则附件不可用，但普通对话照常工作 —— 降级而非全盘失败。
+  storage-url: '${STORAGE_URL:-http://localhost:26610}'
   # providers.api_key 的 AES-GCM 主密钥（32 字节：64 位 hex 或 32 位原始）。
   # 无默认值：缺失时 main.go 启动即 fatal，绝不带病启动——
   # 历史教训是它曾只靠手动 export 存在，重启后静默丢失，直到用户发消息才失败。

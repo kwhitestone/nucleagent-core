@@ -11,9 +11,27 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { ApiError } from "@/api/http";
 import { followUp as followUpApi, getMessages } from "@/api/conversation";
-import type { Message } from "@/api/types";
+import type { Message, MessageAttachment } from "@/api/types";
 import { useStreamConversation } from "@/composables/useStreamConversation";
 import { toast } from "@/composables/useToast";
+import AttachmentPicker from "@/components/AttachmentPicker.vue";
+import AttachmentChips from "@/components/AttachmentChips.vue";
+
+/**
+ * 读取一条消息上的附件清单。
+ *
+ * 后端写在 metadata.attachments（model/message.go 预留的 key）。metadata 的类型是
+ * Record<string, unknown>，这里做一次运行时窄化 —— 坏数据按无附件处理，不让一条
+ * 脏记录把整个消息列表炸掉。
+ */
+function messageAttachments(m: Message): MessageAttachment[] {
+  const raw = m.metadata?.attachments;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (a): a is MessageAttachment =>
+      typeof a === "object" && a !== null && typeof (a as MessageAttachment).fileId === "string",
+  );
+}
 
 /** Markdown → 安全 HTML（防 XSS）。 */
 function renderMarkdown(text: string): string {
@@ -29,9 +47,13 @@ const messages = ref<Message[]>([]);
 const loading = ref(true);
 const followUp = ref("");
 const sending = ref(false);
+/** 本轮追问要带的附件（选中即已上传，这里只持有引用）。 */
+const followUpAttachments = ref<MessageAttachment[]>([]);
 
-/** 显示用户消息（text）、流式回复（streaming）、最终回复（result）、工具调用（tool_call）。
- *  agent.thinking 的 streaming 行（含子代理输出）始终保留，不被 result 替代。
+/** 显示用户消息（text）、流式回复（streaming）、最终回复（result）、
+ *  工具调用（tool_call）、错误（error）。
+ *  agent.thinking 的 streaming 行（含子代理输出）保留，但**同轮已出错时隐藏**——
+ *  否则后端失败后前端仍挂着「正在处理…」转圈，永远不告诉用户出了什么事。
  *  主代理的 streaming 行在有同轮 result 后隐藏（避免重复）。 */
 const visibleMessages = computed(() => {
   const resultDelegations = new Set(
@@ -39,16 +61,27 @@ const visibleMessages = computed(() => {
       .filter((m) => m.msgType === "result" && m.metadata?.delegation_id)
       .map((m) => m.metadata?.delegation_id as string),
   );
+  // 已出错的 delegation：其 streaming 行（含 agent.thinking）不再显示，
+  // 由 error 气泡取代，避免「转圈 + 无输出」的静默失败。
+  const erroredDelegations = new Set(
+    messages.value
+      .filter((m) => m.msgType === "error" && m.metadata?.delegation_id)
+      .map((m) => m.metadata?.delegation_id as string),
+  );
   return messages.value.filter((m) => {
     if (m.msgType === "text" || m.msgType === "result") return true;
+    // error 必须渲染：这是用户唯一能看到失败原因的地方。
+    if (m.msgType === "error") return true;
     if (m.msgType === "tool_call") {
       return (m.content || "").trim() !== "";
     }
     if (m.msgType === "streaming") {
-      // agent.thinking 行（思考过程 + 子代理输出）始终保留
+      const del = m.metadata?.delegation_id as string;
+      // 本轮已出错 → 隐藏残留的 streaming 行
+      if (del && erroredDelegations.has(del)) return false;
+      // agent.thinking 行（思考过程 + 子代理输出）保留
       if (m.senderName === "agent.thinking") return true;
       // 主代理 streaming 行：同轮 result 存在则隐藏
-      const del = m.metadata?.delegation_id as string;
       if (del && resultDelegations.has(del)) return false;
       return true;
     }
@@ -108,12 +141,19 @@ async function handleFollowUp(): Promise<void> {
   if (!text || sending.value) return;
   sending.value = true;
   followUp.value = "";
+  // 先取快照再清空：失败时要能原样恢复，不能让用户重新选一遍附件。
+  const atts = followUpAttachments.value.map((a) => ({ fileId: a.fileId, name: a.name }));
+  const attsBackup = followUpAttachments.value;
+  followUpAttachments.value = [];
 
   try {
-    await followUpApi(props.id, text);
+    await followUpApi(props.id, text, atts);
     // 不 await consumeStream；agent 回复经长期 SSE 连接到达。
   } catch (error) {
     toast.error(error instanceof ApiError ? error.message : t("conversation.sendFailed"));
+    // 复原输入与附件，用户可直接重试。
+    followUp.value = text;
+    followUpAttachments.value = attsBackup;
     sending.value = false;
   }
 }
@@ -127,6 +167,18 @@ watch(
     if (cur !== null) sawStreamingThisCycle = true;
     // 从有值 -> null 且本轮有过 streaming：终态到达，解锁输入框。
     if (cur === null && prev !== null && sawStreamingThisCycle && sending.value) {
+      sending.value = false;
+      sawStreamingThisCycle = false;
+    }
+  },
+);
+
+// error 是终态：后端已置 conversation.status=failed，本轮不会再有消息。
+// 单独解锁输入框——否则失败后输入框一直 disabled，用户既看不到原因也重试不了。
+watch(
+  () => messages.value.filter((m) => m.msgType === "error").length,
+  (cur, prev) => {
+    if (cur > prev && sending.value) {
       sending.value = false;
       sawStreamingThisCycle = false;
     }
@@ -178,6 +230,15 @@ void streamingId;
             <span class="tool-name">{{ m.senderName }}</span>
             <span class="tool-detail">{{ m.content || '...' }}</span>
           </div>
+          <!-- error：失败原因（不渲染 markdown，原样展示后端错误文本） -->
+          <div v-else-if="m.msgType === 'error'" class="error-bubble">
+            <span class="error-icon">⚠</span>
+            <div class="error-body">
+              <div class="error-title">{{ t('conversation.failed') }}</div>
+              <div class="error-detail">{{ m.content || t('conversation.sendFailed') }}</div>
+              <div v-if="m.createdAt" class="error-time">{{ formatTime(m.createdAt) }}</div>
+            </div>
+          </div>
           <!-- 正常消息气泡 -->
           <div v-else class="message" :class="m.senderType === 'user' ? 'user' : 'assistant'">
           <div class="message-avatar">
@@ -190,6 +251,8 @@ void streamingId;
               <span v-if="m.createdAt" class="message-time">{{ formatTime(m.createdAt) }}</span>
             </div>
             <div class="message-bubble" v-html="renderMarkdown(m.content || '')" />
+            <!-- 附件必须是真实 Vue 节点：气泡内容过 DOMPurify，注入的元素点不动。 -->
+            <AttachmentChips :attachments="messageAttachments(m)" />
           </div>
           </div>
         </template>
@@ -204,10 +267,7 @@ void streamingId;
             @keydown.enter.exact.prevent="handleFollowUp"
           />
           <div class="composer-toolbar">
-            <button class="tool-btn" type="button" :title="t('common.attachment')">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
-              {{ t('common.attachment') }}
-            </button>
+            <AttachmentPicker v-model="followUpAttachments" :disabled="sending" show-label />
             <button class="tool-btn active" type="button" :title="t('conversation.agentMode')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
               {{ t('conversation.agentMode') }}
@@ -216,6 +276,11 @@ void streamingId;
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
             </button>
           </div>
+          <AttachmentChips
+            :attachments="followUpAttachments"
+            removable
+            @remove="(id: string) => (followUpAttachments = followUpAttachments.filter((a) => a.fileId !== id))"
+          />
         </div>
       </div>
     </div>
@@ -247,6 +312,24 @@ void streamingId;
 .tool-icon { font-size: 12px; }
 .tool-name { font-weight: 600; color: var(--indigo-600); }
 .tool-detail { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 错误气泡：失败原因必须显眼且可选中复制（排查用） */
+.error-bubble {
+  display: flex; gap: 10px; align-items: flex-start;
+  margin-left: 48px; max-width: 85%; width: fit-content;
+  padding: 10px 14px;
+  background: #fef2f2; border: 1px solid #fecaca;
+  border-radius: var(--r-md);
+  animation: fade-in-up 0.4s var(--ease-out) both;
+}
+.error-icon { font-size: 14px; line-height: 1.5; color: #dc2626; flex-shrink: 0; }
+.error-body { min-width: 0; }
+.error-title { font-size: 13px; font-weight: 600; color: #b91c1c; margin-bottom: 2px; }
+.error-detail {
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
+  color: #7f1d1d; word-break: break-word; user-select: text;
+}
+.error-time { font-size: 11px; color: #b91c1c; opacity: 0.7; margin-top: 4px; font-variant-numeric: tabular-nums; }
 
 .message {
   display: flex; gap: 14px; max-width: 100%;
