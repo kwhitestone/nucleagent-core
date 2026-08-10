@@ -28,6 +28,7 @@ func RegisterRoutes(api huma.API) {
 	registerMessages(api)
 	registerStream(api)   // SSE
 	registerFollowUp(api) // 多轮对话追加消息
+	registerUpdate(api)   // 切换模型/提供商
 	registerCancel(api)
 }
 
@@ -66,8 +67,8 @@ func registerCreate(api huma.API) {
 		}
 		conv, err := svc.Default.CreateAndExecute(ctx, userID, &input.Body)
 		if err != nil {
-			// 附件不可用是客户端可修正的问题，与服务端故障区分开（同 follow-up）。
-			if errors.Is(err, svc.ErrInvalidAttachment) {
+			// 附件/模型不可用是客户端可修正的问题，与服务端故障区分开（同 follow-up）。
+			if errors.Is(err, svc.ErrInvalidAttachment) || errors.Is(err, svc.ErrInvalidModel) {
 				return nil, huma.NewError(http.StatusBadRequest, err.Error())
 			}
 			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
@@ -265,6 +266,10 @@ type FollowUpInput struct {
 	Body struct {
 		Input       string                `json:"input" maxLength:"8192"`
 		Attachments []svc.AttachmentInput `json:"attachments,omitempty" doc:"附件引用（先经 storage 上传拿到 fileId）"`
+		// 本轮同时切换模型/提供商（省略则沿用对话现值）。
+		// 变更会触发 executor 重建 hermes session —— 模型在建 session 时固化。
+		ProviderID *uint  `json:"providerId,omitempty" doc:"切换 LLM 提供商 ID"`
+		Model      string `json:"model,omitempty" doc:"切换模型名"`
 	}
 }
 
@@ -298,10 +303,11 @@ func registerFollowUp(api huma.API) {
 		if conv.Status == "executing" {
 			return nil, huma.NewError(http.StatusConflict, "对话正在执行中，请等待完成或取消后再追加")
 		}
-		if err := svc.Default.FollowUp(ctx, conv, input.Body.Input, input.Body.Attachments); err != nil {
-			// 只有附件不可用才是客户端问题（引用了不存在/未完成的文件），
-			// 落 400 让用户知道可以重新上传；DB 之类的失败仍是 500。
-			if errors.Is(err, svc.ErrInvalidAttachment) {
+		sel := &svc.ModelSelection{ProviderID: input.Body.ProviderID, Model: input.Body.Model}
+		if err := svc.Default.FollowUp(ctx, conv, input.Body.Input, input.Body.Attachments, sel); err != nil {
+			// 附件不可用/模型选择不可用都是客户端可自行修正的问题 → 400；
+			// DB 之类的失败仍是 500。归错会让用户把可修正的错看成服务器故障。
+			if errors.Is(err, svc.ErrInvalidAttachment) || errors.Is(err, svc.ErrInvalidModel) {
 				return nil, huma.NewError(http.StatusBadRequest, err.Error())
 			}
 			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
@@ -309,6 +315,61 @@ func registerFollowUp(api huma.API) {
 		// 重新加载返回最新状态。
 		conv, _ = loadOwnedConversation(ctx, input.ID)
 		resp := &FollowUpOutput{}
+		resp.Body.Code = 0
+		resp.Body.Message = "ok"
+		resp.Body.Data = conv
+		return resp, nil
+	})
+}
+
+// ---- Update（切换模型/提供商）----
+
+// UpdateInput 修改对话设置请求。
+//
+// 只允许改 provider/model —— 其余字段（mode/status/title）由系统维护，
+// 开放它们会让客户端能把对话推进到非法状态。
+type UpdateInput struct {
+	ID   string `path:"id"`
+	Body svc.ModelSelection
+}
+
+// UpdateOutput 修改对话设置响应。
+type UpdateOutput struct {
+	Body struct {
+		Code    int                 `json:"code" example:"0"`
+		Message string              `json:"message" example:"success"`
+		Data    *model.Conversation `json:"data"`
+	}
+}
+
+func registerUpdate(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "conversationUpdate",
+		Method:      http.MethodPatch,
+		Path:        "/api/v1/addons/conversation/{id}",
+		Summary:     "修改对话设置（切换模型/提供商）",
+		Description: "切换对话使用的 LLM 提供商与模型，下一轮执行生效",
+		Tags:        []string{"Conversation"},
+		Security:    []map[string][]string{{"AuthTokenAuth": {}}},
+	}, func(ctx context.Context, input *UpdateInput) (*UpdateOutput, error) {
+		// 校验归属（防 IDOR）。
+		conv, err := loadOwnedConversation(ctx, input.ID)
+		if err != nil {
+			return nil, err
+		}
+		// 执行中不允许改：本轮的 key 与 hermes session 已按旧模型建好，
+		// 中途改只会得到「一半旧一半新」的状态。与 follow-up 的处理一致。
+		if conv.Status == "executing" {
+			return nil, huma.NewError(http.StatusConflict, "对话正在执行中，请等待完成或取消后再切换模型")
+		}
+		if err := svc.Default.UpdateModel(conv, &input.Body); err != nil {
+			if errors.Is(err, svc.ErrInvalidModel) {
+				return nil, huma.NewError(http.StatusBadRequest, err.Error())
+			}
+			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
+		}
+		conv, _ = loadOwnedConversation(ctx, input.ID)
+		resp := &UpdateOutput{}
 		resp.Body.Code = 0
 		resp.Body.Message = "ok"
 		resp.Body.Data = conv

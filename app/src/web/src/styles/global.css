@@ -404,3 +404,53 @@ a:hover {
 }
 
 .conv__send { height: 40px; padding: 0 20px; font-size: 14px; flex-shrink: 0; }
+
+/* ---- composer 共用按钮 ----
+ *
+ * 这些类原本只写在 Home.vue 的非 scoped <style> 里，而 Conversation.vue 也在用
+ * （.composer-btn.send）。那样只有先访问过 /chat、让 Home 的 lazy chunk 把样式
+ * 泄漏成全局之后才生效 —— 而壳应用是 postMessage 深链直接进 /c/:id 的，
+ * 必然踩到：发送按钮丢失渐变、尺寸与光晕。放进全局样式表消除这个顺序依赖。
+ */
+.composer-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-md);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  transition: all 0.2s var(--ease);
+}
+
+.composer-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  transform: scale(1.1);
+}
+
+.composer-btn.send {
+  background: var(--grad-teal-indigo);
+  background-size: 200% 200%;
+  animation: gradient-flow 4s var(--ease) infinite;
+  color: white;
+  box-shadow: var(--shadow-glow-teal);
+}
+
+.composer-btn.send:hover:not(:disabled) {
+  transform: scale(1.1) translateY(-1px);
+  box-shadow: var(--shadow-glow-indigo);
+}
+
+.composer-btn.send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer-btn svg {
+  width: 18px;
+  height: 18px;
+}

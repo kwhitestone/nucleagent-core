@@ -19,7 +19,13 @@ import { useConversationStore } from "@/store/conversation";
 import { toast } from "@/composables/useToast";
 import AttachmentPicker from "@/components/AttachmentPicker.vue";
 import AttachmentChips from "@/components/AttachmentChips.vue";
-import type { AgentTemplate, ConversationMode, MessageAttachment } from "@/api/types";
+import ModelPicker from "@/components/ModelPicker.vue";
+import type {
+  AgentTemplate,
+  ConversationMode,
+  MessageAttachment,
+  ModelChoice,
+} from "@/api/types";
 
 const router = useRouter();
 const store = useConversationStore();
@@ -82,6 +88,8 @@ onMounted(async () => {
 const selected = ref(0);
 /** 任务附件（选中即已上传到 storage，这里持有引用）。 */
 const attachments = ref<MessageAttachment[]>([]);
+/** 选定的模型；null = 用服务端默认。 */
+const modelChoice = ref<ModelChoice | null>(null);
 
 const form = reactive({
   name: "",
@@ -135,13 +143,15 @@ async function launch(): Promise<void> {
     const created = await store.create({
       mode,
       input,
-      model: "",
       metadata: {
         execMode: form.execMode,
         outputFormat: form.outputFormat,
         taskName: name,
       },
       attachments: attachments.value.map((a) => ({ fileId: a.fileId, name: a.name })),
+      // 模型与 provider 成对下发；未选则都不带，由服务端用默认。
+      model: modelChoice.value?.model ?? "",
+      providerId: modelChoice.value?.providerId,
     });
     router.push(`/c/${created.id}`);
   } catch (error) {
@@ -183,6 +193,11 @@ async function launch(): Promise<void> {
         <div class="form-group">
           <label>{{ t('task.form.descLabel') }} <span class="label-hint">{{ t('task.form.descHint') }}</span></label>
           <textarea v-model="form.desc" class="form-textarea" :placeholder="t('task.form.descPlaceholder')" />
+        </div>
+
+        <div class="form-group">
+          <label>{{ t('common.model') }}</label>
+          <ModelPicker v-model="modelChoice" :disabled="submitting" />
         </div>
 
         <div class="form-group">

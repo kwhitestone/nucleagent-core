@@ -74,6 +74,16 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 		return nil, err
 	}
 
+	// 0.5 校验模型选择。同样在落库之前 —— 否则会留下一条指向不可用模型的对话，
+	//     它能创建成功却在执行时才失败，用户看到的是「发出去了但报错」。
+	var providerID uint
+	if req.ProviderID != nil {
+		providerID = *req.ProviderID
+	}
+	if err := ValidateSelection(providerID, req.Model); err != nil {
+		return nil, err
+	}
+
 	// 1. 创建 conversation。
 	conv := &model.Conversation{
 		UserID:     userID,
@@ -107,7 +117,8 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 	stream.Default.PublishCreated(conv.ID, userMsg)
 
 	// 3. 异步调度执行（不阻塞 HTTP 响应）。
-	go s.dispatch(context.Background(), conv, req.Input, atts)
+	//    新建对话 executor 侧本就没有 session，无需重置信号。
+	go s.dispatch(context.Background(), conv, req.Input, atts, false)
 
 	return conv, nil
 }
@@ -116,11 +127,20 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID uint, req *Create
 //
 // 与 CreateAndExecute 的区别：不新建 conversation，只追加 user message，
 // 然后复用 dispatch 重新下发 a2a_request。status 回到 executing。
-func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input string, attachments []AttachmentInput) error {
+// sel 非 nil 时表示本轮同时切换模型/provider：先落库再 dispatch，并要求
+// executor 重建 hermes session（否则新模型不生效，见 dispatch 的 sessionReset）。
+func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input string, attachments []AttachmentInput, sel *ModelSelection) error {
 	db := global.PRISM_DB
 
 	// 0. 先核对附件（同 CreateAndExecute：不合法则整个追问失败，不留半成品消息）。
 	atts, err := resolveAttachments(ctx, attachments)
+	if err != nil {
+		return err
+	}
+
+	// 0.5 模型切换：校验 + 落库。放在写 message 之前 —— 校验失败就整个追问失败，
+	//     不留一条「用户消息已存但模型没换成」的错位状态。
+	modelChanged, err := s.applyModelSelection(conv, sel)
 	if err != nil {
 		return err
 	}
@@ -144,7 +164,14 @@ func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input 
 		Updates(map[string]any{"status": "executing", "completed_at": nil})
 
 	// 3. 异步调度执行（不阻塞 HTTP 响应）。
-	go s.dispatch(context.Background(), conv, input, atts)
+	//
+	//    重置信号有两个来源，缺一不可：
+	//      - modelChanged：本轮 follow-up 自带模型切换；
+	//      - takePendingReset：先前通过 PATCH 切过模型（那时库里已是新值，
+	//        本轮比对看不出差异，只能靠持久化标记）。
+	//    没变时不重建，否则白扔 hermes 的增量 resume。
+	needReset := modelChanged || s.takePendingReset(conv)
+	go s.dispatch(context.Background(), conv, input, atts, needReset)
 
 	return nil
 }
@@ -153,7 +180,10 @@ func (s *Service) FollowUp(ctx context.Context, conv *model.Conversation, input 
 //
 // attachments 是**本轮**新上传的附件；历史轮次的附件在下面从各条 message 的
 // metadata 里重新读出，两者来源不同，不能混为一谈。
-func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input string, attachments []a2a.Attachment) {
+// sessionReset 为 true 时通知 executor 丢弃 hermes 侧缓存的 session。
+// 模型/provider 变更必须置 true —— hermes 的模型是建 session 时定的，
+// 只 resume 会继续用旧模型，用户改了模型却毫无变化。
+func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input string, attachments []a2a.Attachment, sessionReset bool) {
 	stepID := uuid.NewString()
 	delegationID := uuid.NewString()
 	senderSlug := "agent"
@@ -228,6 +258,23 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 	// 本轮附件现签现用（URL 有时效，不落库）。
 	signAttachments(ctx, attachments)
 
+	// 只有对话真的选了 provider 才下发对话级 key。
+	//
+	// providerID=0 时签出来的 key 是**不可用的**：llmproxy 按 providerID 查库，
+	// provider 0 不存在 → 500 "llm provider unavailable"。此前这个坏 key 也在下发，
+	// 但 executor 从不读它（一律用服务级 key），所以问题被掩盖着；改成优先用对话级
+	// key 之后它就暴露成"不选模型就报错"。不下发即让 executor 回退服务级兜底。
+	execHeaders := map[string]string{}
+	if providerID != 0 {
+		execHeaders[llm.KeyHeader] = tempKey.Key
+	}
+	if sessionReset {
+		// 模型变了：要求 executor 丢弃 hermes 侧已缓存的 session。
+		// hermes 的模型在建 session 时固化，只 resume 会继续用旧模型。
+		// 历史随 Context 全量重注，不丢上下文。
+		execHeaders[headerSessionReset] = "1"
+	}
+
 	execReq := a2a.ExecutionRequest{
 		ConversationID: conv.ID,
 		StepID:         stepID,
@@ -237,17 +284,18 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 		Input:          input,
 		Context:        histJSON, // 对话历史（executor 注入 hermes session）
 		Attachments:    attachments,
-		Headers: map[string]string{
-			llm.KeyHeader: tempKey.Key,
-		},
+		Headers:        execHeaders,
 	}
 	body, _ := json.Marshal(execReq)
 	reqEnv, _ := a2a.NewEnvelopeWithRequest(time.Now().UnixMilli(), a2a.EnvA2ARequest, delegationID, a2a.A2ARequestPayload{
 		Method:     "message/send",
 		Capability: rs.ExecBackend,
-		Headers:    map[string]string{llm.KeyHeader: tempKey.Key},
-		Body:       body,
-		Stream:     true,
+		// 与 execReq.Headers 保持一致：providerID=0 时不下发不可用的 key。
+		// executor runtime 会把 payload.Headers 作为 fallback 合并进 execReq.Headers，
+		// 这里若仍带上，上面的判断就白做了。
+		Headers: execHeaders,
+		Body:    body,
+		Stream:  true,
 	})
 
 	// 下发。executor 异步执行，结果通过 OnTaskResult 回报。

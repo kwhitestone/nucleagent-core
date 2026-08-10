@@ -23,6 +23,11 @@ export default {
     attachmentTooMany: "At most {max} attachments",
     attachmentRemove: "Remove attachment",
     attachmentDownloadFailed: "Failed to get download URL",
+    model: "Model",
+    modelDefault: "Default model",
+    modelLoadFailed: "Failed to load models; the default will be used",
+    modelSwitched: "Switched to {model}; takes effect next turn",
+    modelSwitchFailed: "Failed to switch model",
     you: "You",
   },
   workbench: {

@@ -4,6 +4,7 @@ import type {
   Conversation,
   CreateConversationRequest,
   Message,
+  ModelChoice,
   SSEEventName,
   SSEMessageEvent,
 } from "./types";
@@ -52,12 +53,36 @@ export async function followUp(
   conversationId: number | string,
   input: string,
   attachments?: AttachmentRef[],
+  model?: ModelChoice,
 ): Promise<Conversation> {
+  // 无附件/未切换模型时不带对应字段，请求体与改动前逐字节一致。
+  const body: Record<string, unknown> = { input };
+  if (attachments?.length) body.attachments = attachments;
+  if (model) {
+    body.providerId = model.providerId;
+    body.model = model.model;
+  }
   const response = await http.post<Envelope<Conversation>>(
     `${BASE}/${conversationId}/follow-up`,
-    // 无附件时不带该字段，请求体与改动前逐字节一致。
-    attachments?.length ? { input, attachments } : { input },
+    body,
   );
+  return response.data?.data as Conversation;
+}
+
+/**
+ * PATCH /conversation/:id — 切换对话使用的模型/提供商。
+ *
+ * 只落库，下一轮执行才生效（后端会在下次 dispatch 时让 executor 重建
+ * hermes session —— 模型是建 session 时固化的，不重建改不掉）。
+ */
+export async function updateConversationModel(
+  conversationId: number | string,
+  model: ModelChoice,
+): Promise<Conversation> {
+  const response = await http.patch<Envelope<Conversation>>(`${BASE}/${conversationId}`, {
+    providerId: model.providerId,
+    model: model.model,
+  });
   return response.data?.data as Conversation;
 }
 

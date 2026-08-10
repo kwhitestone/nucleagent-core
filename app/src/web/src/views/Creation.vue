@@ -84,7 +84,9 @@ onMounted(async () => {
 
 function pick(c: CreationCard): void {
   // 跳回首页并把类型预填进 composer。首页通过 query 携带预填文本。
-  router.push({ name: "home", query: { prefill: c.prompt } });
+  // 路由名是 "chat"（见 router/index.ts）—— 此前写的 "home" 并不存在，
+  // vue-router 对未知 name 直接抛错，导致这五张卡片点了全都没反应。
+  router.push({ name: "chat", query: { prefill: c.prompt } });
 }
 </script>
 

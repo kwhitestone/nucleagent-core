@@ -84,11 +84,22 @@ export interface AttachmentRef {
   name?: string;
 }
 
+/**
+ * 一次模型选择。**必须成对**：llmproxy 按 providerId 查库解密 API key，
+ * 同名模型可能挂在不同 provider 下，光有模型名无法确定用谁的凭据。
+ */
+export interface ModelChoice {
+  providerId: number;
+  model: string;
+}
+
 /** POST /conversation body. */
 export interface CreateConversationRequest {
   mode: ConversationMode;
   input: string;
   model?: string;
+  /** LLM 提供商 ID。与 model 成对提供，缺一后端会拒。 */
+  providerId?: number;
   /** 暂存执行模式/输出格式等前端-only 元数据（后端暂未持久化，预留给未来字段）。 */
   metadata?: Record<string, unknown>;
   /** 附件引用（先经 storage 上传拿到 fileId）。 */

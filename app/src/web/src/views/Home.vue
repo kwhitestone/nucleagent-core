@@ -9,16 +9,18 @@
  * 仅保留内容。创建对话的逻辑沿用 useConversationStore。
  */
 import { computed, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { ApiError } from "@/api/http";
 import { useConversationStore } from "@/store/conversation";
 import { toast } from "@/composables/useToast";
 import AttachmentPicker from "@/components/AttachmentPicker.vue";
 import AttachmentChips from "@/components/AttachmentChips.vue";
-import type { ConversationMode, MessageAttachment } from "@/api/types";
+import ModelPicker from "@/components/ModelPicker.vue";
+import type { ConversationMode, MessageAttachment, ModelChoice } from "@/api/types";
 
 const router = useRouter();
+const route = useRoute();
 const store = useConversationStore();
 const { t } = useI18n();
 
@@ -26,6 +28,8 @@ const input = ref("");
 const submitting = ref(false);
 /** 待发送附件。选中即已上传到 storage，这里持有的只是引用（fileId 等）。 */
 const attachments = ref<MessageAttachment[]>([]);
+/** 选定的模型；null = 用服务端默认。 */
+const modelChoice = ref<ModelChoice | null>(null);
 
 /** 9 张建议卡。点击后把标题填入输入框。 */
 const suggestionKeys = [
@@ -57,7 +61,9 @@ async function handleCreate(): Promise<void> {
     const created = await store.create({
       mode,
       input: text,
-      model: "",
+      // 模型与 provider 成对下发；未选则都不带，由服务端用默认。
+      model: modelChoice.value?.model ?? "",
+      providerId: modelChoice.value?.providerId,
       // 只传引用，字节早在选中时就直传给 storage 了。
       attachments: attachments.value.map((a) => ({ fileId: a.fileId, name: a.name })),
     });
@@ -76,6 +82,13 @@ function fillSuggestion(title: string): void {
 }
 
 onMounted(() => {
+  // Creation 页点卡片会带 ?prefill=... 跳过来，预填进 composer。
+  // 此前没有这段读取，即使修好路由名，卡片点击也只是跳转、看不出任何效果。
+  const prefill = route.query.prefill;
+  if (typeof prefill === "string" && prefill.trim() && !input.value) {
+    input.value = prefill;
+  }
+
   // 首页挂载时拉一次历史，用于推给壳侧栏（桥接在 store 变化时 dispatch）。
   store.load().catch((e: unknown) => {
     toast.error(e instanceof ApiError ? e.message : t("home.loadHistoryFailed"));
@@ -99,6 +112,7 @@ onMounted(() => {
             @keydown.enter.exact.prevent="handleCreate"
           />
           <div class="composer-actions">
+            <ModelPicker v-model="modelChoice" :disabled="submitting" compact />
             <AttachmentPicker v-model="attachments" :disabled="submitting" />
             <button class="composer-btn send" :title="t('common.send')" type="button" :disabled="submitting || !input.trim()" @click="handleCreate">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
@@ -226,24 +240,8 @@ onMounted(() => {
 
 .composer-actions { display: flex; align-items: center; gap: 4px; padding: 4px; }
 
-.composer-btn {
-  width: 36px; height: 36px; border-radius: var(--r-md);
-  border: none; background: transparent; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  color: var(--text-tertiary); transition: all 0.2s var(--ease);
-}
-
-.composer-btn:hover { background: var(--bg-hover); color: var(--text-primary); transform: scale(1.1); }
-
-.composer-btn.send {
-  background: var(--grad-teal-indigo); background-size: 200% 200%;
-  animation: gradient-flow 4s var(--ease) infinite;
-  color: white; box-shadow: var(--shadow-glow-teal);
-}
-
-.composer-btn.send:hover:not(:disabled) { transform: scale(1.1) translateY(-1px); box-shadow: var(--shadow-glow-indigo); }
-.composer-btn.send:disabled { opacity: 0.5; cursor: not-allowed; }
-.composer-btn svg { width: 18px; height: 18px; }
+/* .composer-btn 系列已移到 styles/global.css —— Conversation.vue 也在用它，
+ * 放在这里只有先访问过 /chat 才生效（详见 global.css 里的说明）。 */
 
 .suggestion-grid {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;

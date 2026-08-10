@@ -23,6 +23,11 @@ export default {
     attachmentTooMany: "最多 {max} 个附件",
     attachmentRemove: "移除附件",
     attachmentDownloadFailed: "获取下载地址失败",
+    model: "模型",
+    modelDefault: "默认模型",
+    modelLoadFailed: "加载模型列表失败，将使用默认模型",
+    modelSwitched: "已切换到 {model}，下一轮生效",
+    modelSwitchFailed: "切换模型失败",
     you: "你",
   },
   workbench: {

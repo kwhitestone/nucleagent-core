@@ -10,12 +10,17 @@ import { useI18n } from "vue-i18n";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { ApiError } from "@/api/http";
-import { followUp as followUpApi, getMessages } from "@/api/conversation";
-import type { Message, MessageAttachment } from "@/api/types";
+import {
+  followUp as followUpApi,
+  getMessages,
+  updateConversationModel,
+} from "@/api/conversation";
+import type { Message, MessageAttachment, ModelChoice } from "@/api/types";
 import { useStreamConversation } from "@/composables/useStreamConversation";
 import { toast } from "@/composables/useToast";
 import AttachmentPicker from "@/components/AttachmentPicker.vue";
 import AttachmentChips from "@/components/AttachmentChips.vue";
+import ModelPicker from "@/components/ModelPicker.vue";
 
 /**
  * 读取一条消息上的附件清单。
@@ -49,6 +54,13 @@ const followUp = ref("");
 const sending = ref(false);
 /** 本轮追问要带的附件（选中即已上传，这里只持有引用）。 */
 const followUpAttachments = ref<MessageAttachment[]>([]);
+/**
+ * 对话当前选定的模型；null = 沿用服务端现值。
+ *
+ * 切换后走 PATCH 立即落库，下一轮生效（后端会让 executor 重建 hermes session ——
+ * 模型是建 session 时固化的）。同时随下一次 follow-up 一起下发，双保险。
+ */
+const modelChoice = ref<ModelChoice | null>(null);
 
 /** 显示用户消息（text）、流式回复（streaming）、最终回复（result）、
  *  工具调用（tool_call）、错误（error）。
@@ -147,7 +159,9 @@ async function handleFollowUp(): Promise<void> {
   followUpAttachments.value = [];
 
   try {
-    await followUpApi(props.id, text, atts);
+    // 模型选择随本轮一起下发：即使上面的 PATCH 因为网络原因没落库，
+    // 这一轮也会用上用户选的模型（后端对同值切换是幂等的）。
+    await followUpApi(props.id, text, atts, modelChoice.value ?? undefined);
     // 不 await consumeStream；agent 回复经长期 SSE 连接到达。
   } catch (error) {
     toast.error(error instanceof ApiError ? error.message : t("conversation.sendFailed"));
@@ -155,6 +169,25 @@ async function handleFollowUp(): Promise<void> {
     followUp.value = text;
     followUpAttachments.value = attsBackup;
     sending.value = false;
+  }
+}
+
+/**
+ * 切换模型：立即 PATCH 落库，下一轮生效。
+ *
+ * 不等下一次 follow-up 才提交，是为了让选择立刻持久化 —— 用户可能切完模型就
+ * 关掉页面，回来时应当还是新模型。失败则回滚 UI，不让界面显示一个没生效的选择。
+ */
+async function switchModel(next: ModelChoice | null): Promise<void> {
+  const prev = modelChoice.value;
+  modelChoice.value = next;
+  if (!next) return; // 清空选择只影响本地，不 PATCH（后端没有"恢复默认"语义）
+  try {
+    await updateConversationModel(props.id, next);
+    toast.success(t("common.modelSwitched", { model: next.model }));
+  } catch (error) {
+    modelChoice.value = prev;
+    toast.error(error instanceof ApiError ? error.message : t("common.modelSwitchFailed"));
   }
 }
 
@@ -267,6 +300,12 @@ void streamingId;
             @keydown.enter.exact.prevent="handleFollowUp"
           />
           <div class="composer-toolbar">
+            <ModelPicker
+              :model-value="modelChoice"
+              :disabled="sending"
+              compact
+              @update:model-value="switchModel"
+            />
             <AttachmentPicker v-model="followUpAttachments" :disabled="sending" show-label />
             <button class="tool-btn active" type="button" :title="t('conversation.agentMode')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>

@@ -88,6 +88,50 @@ func handleProxy(c *gin.Context) {
 	// 每次成功请求都刷新 TTL，永不过期。
 	Default.RefreshTTL(tk.Key)
 
+	// 1.5 校验请求体里的模型在该 provider 的白名单内。
+	//
+	// 必须在这里校验：Director 只改 URL/Host/鉴权头，请求体是**原样转发**的，
+	// 所以实际执行并计费的模型就是体里这个值，与签 key 时的 tk.Model 无关。
+	//
+	// 只缓冲**请求**体：它非流式且很小（几 KB 的 messages）。响应体绝不缓冲 ——
+	// 那条 TeeReader 流式路径是 SSE 的命脉（见下面 ModifyResponse）。
+	reqModel := ""
+	if c.Request.Body != nil {
+		body, readErr := io.ReadAll(c.Request.Body)
+		_ = c.Request.Body.Close()
+		if readErr != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"code": 400, "message": "read request body failed",
+			})
+			return
+		}
+		// 复位 body 供 ReverseProxy 转发。ContentLength/GetBody 必须一起修，
+		// 否则 Transport 可能按旧长度截断，或在重试时拿不到 body。
+		restoreBody(c.Request, body)
+		reqModel = modelFromRequestBody(body)
+	}
+	if err := ValidateModel(tk.ProviderID, reqModel); err != nil {
+		if errors.Is(err, ErrModelNotAllowed) {
+			// 客户端可自行纠正 → 4xx，并把可用清单回给它。
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"code": 400, "message": err.Error(),
+			})
+			return
+		}
+		global.PRISM_LOG.Error("llmproxy: validate model failed",
+			zap.Uint("providerID", tk.ProviderID), zap.String("model", reqModel), zap.Error(err))
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"code": 500, "message": "model validation failed: check server config",
+		})
+		return
+	}
+	// CallLog 记**实际请求的**模型，而非签 key 时的 tk.Model —— 两者可以不同，
+	// 记错会让成本归因与用量统计静默失真。体里没带则退回 key 上的值。
+	logModel := reqModel
+	if logModel == "" {
+		logModel = rp.Model
+	}
+
 	// 2. 解析目标 URL。
 	target, err := url.Parse(rp.BaseURL)
 	if err != nil {
@@ -153,7 +197,7 @@ func handleProxy(c *gin.Context) {
 	proxy.ServeHTTP(c.Writer, c.Request)
 
 	// 6. 写 CallLog（异步，不阻塞响应）。
-	go writeCallLog(tk, rp, start, c.Request, respBuf)
+	go writeCallLog(tk, rp, logModel, start, c.Request, respBuf)
 }
 
 // limitWriter 把写入的前 max 字节存入缓冲，超过后静默丢弃。
@@ -208,7 +252,8 @@ type responseRecorder struct {
 const llmProxyLogMaxBytes = 1 << 20 // 1MB
 
 // writeCallLog 异步写 LLM 调用日志。
-func writeCallLog(tk llm.TempLLMKey, rp llm.ResolvedProvider, start time.Time, req *http.Request, rec responseRecorder) {
+// actualModel 是本次请求体里真正使用的模型（见 handleProxy 的 logModel）。
+func writeCallLog(tk llm.TempLLMKey, rp llm.ResolvedProvider, actualModel string, start time.Time, req *http.Request, rec responseRecorder) {
 	if global.PRISM_DB == nil {
 		return
 	}
@@ -228,7 +273,7 @@ func writeCallLog(tk llm.TempLLMKey, rp llm.ResolvedProvider, start time.Time, r
 		ConversationID: tk.ConversationID,
 		StepID:         "", // 由后续上下文注入（v1 占位）
 		CallType:       llm.CallTypeLLM,
-		Model:          rp.Model,
+		Model:          actualModel,
 		Input:          inputPreview,
 		Output:         outputPreview,
 		Meta: model.MustNewJSON(map[string]any{
