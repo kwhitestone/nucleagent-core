@@ -2,6 +2,7 @@ package llmproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,9 +65,22 @@ func handleProxy(c *gin.Context) {
 	}
 	tk, rp, err := resolveByTempKey(tempKey)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"code":    401,
-			"message": "invalid or expired llm proxy key",
+		// 区分两类失败——合并成同一句 401 会把服务端配置问题（如 MASTER_KEY 未设
+		// 导致 api_key 解密失败）伪装成「key 过期」，让排查完全走错方向。
+		if errors.Is(err, ErrKeyNotFound) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "invalid or expired llm proxy key",
+			})
+			return
+		}
+		// provider 解析/解密失败 = 服务端配置问题，不是调用方凭证问题。
+		// 详情只进日志，不回传客户端（避免泄露内部配置细节）。
+		global.PRISM_LOG.Error("llmproxy: resolve provider failed",
+			zap.Uint("providerID", tk.ProviderID), zap.Error(err))
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "llm provider unavailable: check server config",
 		})
 		return
 	}

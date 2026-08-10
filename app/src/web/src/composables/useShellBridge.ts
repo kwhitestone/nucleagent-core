@@ -35,7 +35,7 @@ export function useShellBridge(): void {
     const d = e.data as {
       source?: string;
       type?: string;
-      view?: "home" | "chat" | "creation" | "tasks";
+      view?: "home" | "chat" | "creation" | "tasks" | "providers";
       conversationId?: string | null;
       token?: string | null;
     };
@@ -65,6 +65,7 @@ export function useShellBridge(): void {
         : d.view === "chat" ? "/chat"
         : d.view === "creation" ? "/creation"
         : d.view === "tasks" ? "/tasks"
+        : d.view === "providers" ? "/providers"
         : "/";
     if (router.currentRoute.value.path !== target) {
       void router.push(target);

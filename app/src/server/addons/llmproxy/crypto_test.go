@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/nucleagent/nucleagent-shared/llm"
+	"github.com/spf13/viper"
+
+	"whitestone.top/prism-fusion/global"
 )
 
 // setMasterKey 设置测试用 MASTER_KEY（32 字节 hex）。
@@ -55,6 +58,62 @@ func TestCryptoNoMasterKey(t *testing.T) {
 	_, err := EncryptAPIKey("x")
 	if err == nil {
 		t.Error("encrypt without MASTER_KEY should fail")
+	}
+}
+
+// TestMasterKeyFromViper 验证主密钥优先从 viper（config.yaml 的
+// nucleagent.master-key）读取——这是它接入统一配置体系后的主路径。
+func TestMasterKeyFromViper(t *testing.T) {
+	const viperKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	os.Unsetenv("MASTER_KEY") // 确保不是走 env 回退
+	vp := viper.New()
+	vp.Set("nucleagent.master-key", viperKey)
+	global.PRISM_VP = vp
+	t.Cleanup(func() { global.PRISM_VP = nil })
+
+	if got := masterKeyRaw(); got != viperKey {
+		t.Errorf("masterKeyRaw should read from viper: got %q", got)
+	}
+	if err := ValidateMasterKey(); err != nil {
+		t.Errorf("ValidateMasterKey with valid viper key: %v", err)
+	}
+}
+
+// TestMasterKeyUnexpandedPlaceholderFallsBackToEnv 验证 viper 里残留未展开的
+// "${MASTER_KEY}" 字面量时不被当成密钥，而是回退到环境变量。
+//
+// 这是真实故障模式：config.yaml 写 '${MASTER_KEY}'，若 expandNucleagentEnv
+// 漏掉该键，viper 里就是字面量——绝不能把它当 32 字节密钥用。
+func TestMasterKeyUnexpandedPlaceholderFallsBackToEnv(t *testing.T) {
+	const envKey = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	vp := viper.New()
+	vp.Set("nucleagent.master-key", "${MASTER_KEY}") // 未展开
+	global.PRISM_VP = vp
+	os.Setenv("MASTER_KEY", envKey)
+	t.Cleanup(func() {
+		global.PRISM_VP = nil
+		os.Unsetenv("MASTER_KEY")
+	})
+
+	if got := masterKeyRaw(); got != envKey {
+		t.Errorf("unexpanded placeholder should fall back to env: got %q", got)
+	}
+}
+
+// TestValidateMasterKeyRejectsBadInput 验证启动期自检能挡住缺失与错长度。
+func TestValidateMasterKeyRejectsBadInput(t *testing.T) {
+	global.PRISM_VP = nil
+
+	os.Unsetenv("MASTER_KEY")
+	if err := ValidateMasterKey(); err == nil {
+		t.Error("missing MASTER_KEY should fail validation")
+	}
+
+	// 长度不足（非 32 字节、非 64 hex）。
+	os.Setenv("MASTER_KEY", "tooshort")
+	t.Cleanup(func() { os.Unsetenv("MASTER_KEY") })
+	if err := ValidateMasterKey(); err == nil {
+		t.Error("short MASTER_KEY should fail validation")
 	}
 }
 

@@ -34,6 +34,7 @@ func expandNucleagentEnv() {
 		"nucleagent.executor-url",
 		"nucleagent.redis-addr",
 		"nucleagent.public-url",
+		"nucleagent.master-key",
 	} {
 		raw := global.PRISM_VP.GetString(key)
 		expanded := expandEnv(raw)
@@ -59,6 +60,17 @@ func expandEnv(s string) string {
 
 func main() {
 	initializeSystem()
+
+	// MASTER_KEY 自检：缺失/格式错误直接退出，绝不带病启动。
+	//
+	// 这个值不可能在运行时被补上——带着它跑起来，只会把失败推迟到用户发消息
+	// 那一刻，且表现为 LLM 调用失败，极难定位到「环境变量没配」这个真因。
+	if err := llmproxy.ValidateMasterKey(); err != nil {
+		global.PRISM_LOG.Fatal("MASTER_KEY 未配置或格式错误——core 无法解密 providers.api_key，拒绝启动。"+
+			"请在 nucleagent-deploy/.env 设置 MASTER_KEY（生成：openssl rand -hex 32）。"+
+			"注意：更换该值会使已有 provider 密文永久不可解，需重新录入各 provider 的 API key。",
+			zap.Error(err))
+	}
 
 	// 启动 TempLLMKey 存储：Redis 可达走 Redis（重启/多实例不丢 key），否则内存兜底。
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

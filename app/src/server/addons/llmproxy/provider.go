@@ -2,6 +2,7 @@ package llmproxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,8 +10,6 @@ import (
 	"github.com/nucleagent/nucleagent-shared/model"
 
 	"whitestone.top/prism-fusion/global"
-
-	"gorm.io/gorm"
 )
 
 // ProviderConfig Provider.config JSON 的结构。
@@ -62,11 +61,23 @@ func ResolveProvider(providerID uint) (llm.ResolvedProvider, error) {
 	}, nil
 }
 
+// ErrKeyNotFound 表示 TempLLMKey 查不到或已过期（真正的「鉴权失败」）。
+//
+// 与之相对，ResolveProvider 的错误是**服务端配置问题**（provider 不存在/停用/
+// base_url 非法/MASTER_KEY 未设导致 api_key 解密失败），不是调用方的凭证问题。
+// 两者曾被 proxy 合并成同一句 401 "invalid or expired llm proxy key"，
+// 导致 MASTER_KEY 缺失被误读为 key 过期，排查方向被带偏。务必保持区分。
+var ErrKeyNotFound = errors.New("llmproxy: temp key not found or expired")
+
 // resolveByTempKey 通过 TempLLMKey 解析 Provider（Proxy 端点验签入口）。
+//
+// 返回的 error 分两类，调用方据此区分 401 与 500：
+//   - ErrKeyNotFound：凭证无效 → 401
+//   - 其他：provider 解析/解密失败 → 500
 func resolveByTempKey(tempKey string) (llm.TempLLMKey, llm.ResolvedProvider, error) {
 	tk, ok := Default.Lookup(tempKey)
 	if !ok {
-		return llm.TempLLMKey{}, llm.ResolvedProvider{}, gorm.ErrRecordNotFound
+		return llm.TempLLMKey{}, llm.ResolvedProvider{}, ErrKeyNotFound
 	}
 	rp, err := ResolveProvider(tk.ProviderID)
 	if err != nil {
