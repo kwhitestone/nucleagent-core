@@ -84,10 +84,14 @@ func registerCreate(api huma.API) {
 // ---- List ----
 
 // ListOutput 对话列表响应。
+//
+// 游标分页：按 id DESC 排序，beforeId 为上一页最后一条 id，limit+1 探测 hasMore。
+// 前端用本页最小 id 作下次 beforeId，HasMore 决定是否继续展示「加载更多」。
 type ListOutput struct {
 	Body struct {
-		Code int                  `json:"code" example:"0"`
-		Data []model.Conversation `json:"data"`
+		Code    int                  `json:"code" example:"0"`
+		Data    []model.Conversation `json:"data"`
+		HasMore bool                 `json:"hasMore"`
 	}
 }
 
@@ -99,16 +103,34 @@ func registerList(api huma.API) {
 		Summary:     "列出对话",
 		Tags:        []string{"Conversation"},
 		Security:    []map[string][]string{{"AuthTokenAuth": {}}},
-	}, func(ctx context.Context, input *struct{}) (*ListOutput, error) {
+	}, func(ctx context.Context, input *struct {
+		BeforeID uint `query:"beforeId" doc:"返回 id 小于此值的对话（向下翻页游标）"`
+		Limit    int  `query:"limit" doc:"每页数量，默认20，上限100"`
+	}) (*ListOutput, error) {
 		userID := userIDFromCtx(ctx)
 		if userID == 0 {
 			return nil, huma.NewError(http.StatusUnauthorized, "未认证")
 		}
+		// limit 钳制：未传或越界则回落默认页大小。上限 100 防止恶意拉全表。
+		limit := input.Limit
+		if limit <= 0 || limit > 100 {
+			limit = 20
+		}
+		q := global.PRISM_DB.Where("user_id = ?", userID)
+		if input.BeforeID > 0 {
+			q = q.Where("id < ?", input.BeforeID)
+		}
+		// 多取 1 条判断是否还有下一页，取到 limit+1 条说明 hasMore。
 		var convs []model.Conversation
-		global.PRISM_DB.Where("user_id = ?", userID).Order("id DESC").Limit(100).Find(&convs)
+		q.Order("id DESC").Limit(limit + 1).Find(&convs)
+		hasMore := len(convs) > limit
+		if hasMore {
+			convs = convs[:limit]
+		}
 		resp := &ListOutput{}
 		resp.Body.Code = 0
 		resp.Body.Data = convs
+		resp.Body.HasMore = hasMore
 		return resp, nil
 	})
 }

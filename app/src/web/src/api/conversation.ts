@@ -18,13 +18,37 @@ interface Envelope<T> {
   data?: T;
 }
 
+/** 列表分页参数：beforeId 为上一页最小 id 游标，limit 控制每页大小。 */
+export interface ListConversationsParams {
+  beforeId?: number;
+  limit?: number;
+}
+
+/** 列表响应：data 为本页对话，hasMore 指示是否还有下一页。 */
+export interface ListConversationsResult {
+  data: Conversation[];
+  hasMore: boolean;
+}
+
 /**
- * GET /conversation — list conversations for the current user.
- * 后端返回 { code, data: Conversation[] }，解包取 data。
+ * GET /conversation — list conversations for the current user (游标分页).
+ *
+ * 后端返回 { code, data: Conversation[], hasMore }。beforeId 省略时拉首页；
+ * 翻页时传上一页最小 id。解包取 { data, hasMore }。
  */
-export async function listConversations(): Promise<Conversation[]> {
-  const response = await http.get<Envelope<Conversation[]>>(BASE);
-  return response.data?.data ?? [];
+export async function listConversations(
+  params?: ListConversationsParams,
+): Promise<ListConversationsResult> {
+  const response = await http.get<Envelope<Conversation[]> & { hasMore?: boolean }>(BASE, {
+    params: {
+      beforeId: params?.beforeId,
+      limit: params?.limit,
+    },
+  });
+  return {
+    data: response.data?.data ?? [],
+    hasMore: response.data?.hasMore ?? false,
+  };
 }
 
 /**

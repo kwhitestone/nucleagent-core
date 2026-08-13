@@ -58,6 +58,13 @@ export function useShellBridge(): void {
       return;
     }
 
+    // 壳侧栏滚动到底时请求加载下一页。loadMore 内部有 hasMore/loadingMore 守卫，
+    // 拉到新数据后 store.sorted 变化会自动触发下方 pushConversations 推回壳。
+    if (d.type === "loadMore") {
+      void store.loadMore();
+      return;
+    }
+
     if (d.type !== "view" || !d.view) return;
     const target =
       d.view === "chat" && d.conversationId
@@ -74,7 +81,7 @@ export function useShellBridge(): void {
 
   window.addEventListener("message", onMessage);
 
-  /** 把当前对话列表 + 选中态推给壳。列表不变但选中项变时也要重推。 */
+  /** 把当前对话列表 + 选中态 + 是否还有更多推给壳。列表不变但选中项变时也要重推。 */
   function pushConversations(): void {
     const list = store.sorted;
     const m = router.currentRoute.value.path.match(/^\/c\/(\d+)/);
@@ -85,6 +92,7 @@ export function useShellBridge(): void {
         type: "conversations",
         conversations: list.map((c) => ({ id: c.id, title: c.title, status: c.status })),
         activeId,
+        hasMore: store.hasMore,
       },
       "*",
     );
