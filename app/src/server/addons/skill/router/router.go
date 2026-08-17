@@ -9,7 +9,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/nucleagent/nucleagent-shared/model"
 	"go.uber.org/zap"
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // RegisterRoutes 注册 Skill 路由（技能列表只读 + 技能绑定 CRUD）。

@@ -20,7 +20,7 @@ import (
 
 	"github.com/nucleagent/nucleagent-shared/model"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // restoreBody 把已读出的请求体放回 req，供后续 ReverseProxy 转发。

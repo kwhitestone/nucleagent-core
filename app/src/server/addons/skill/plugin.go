@@ -8,8 +8,8 @@ import (
 	skillRouter "nucleagent-core/addons/skill/router"
 
 	"github.com/danielgtaylor/huma/v2"
-	"whitestone.top/prism-fusion/global"
-	"whitestone.top/prism-fusion/plugin"
+	"github.com/kwhitestone/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/plugin"
 )
 
 // SkillPlugin Skill 插件。

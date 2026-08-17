@@ -9,7 +9,7 @@ import (
 	"github.com/nucleagent/nucleagent-shared/llm"
 	"github.com/nucleagent/nucleagent-shared/model"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // ProviderConfig Provider.config JSON 的结构。

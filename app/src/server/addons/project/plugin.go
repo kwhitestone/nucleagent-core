@@ -9,8 +9,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
-	"whitestone.top/prism-fusion/global"
-	"whitestone.top/prism-fusion/plugin"
+	"github.com/kwhitestone/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/plugin"
 )
 
 // ProjectPlugin Project 插件。

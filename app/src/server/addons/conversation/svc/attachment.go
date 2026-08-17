@@ -16,7 +16,7 @@ import (
 	"github.com/nucleagent/nucleagent-shared/a2a"
 	"github.com/nucleagent/nucleagent-shared/model"
 	"go.uber.org/zap"
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 
 	"nucleagent-core/internal/storageclient"
 )

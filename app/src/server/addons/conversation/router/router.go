@@ -16,7 +16,7 @@ import (
 	"nucleagent-core/addons/conversation/svc"
 	"nucleagent-core/addons/conversation/stream"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // RegisterRoutes 注册 Conversation 路由到 Huma。

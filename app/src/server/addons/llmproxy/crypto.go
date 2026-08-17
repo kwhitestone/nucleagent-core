@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // masterKeyRaw 取主密钥原始字符串。

@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // setupFullDB 初始化 sqlite + nop logger 并迁移 Conversation + Message + Step。

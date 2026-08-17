@@ -13,8 +13,8 @@ import (
 
 	"nucleagent-core/addons/llmproxy"
 
-	"whitestone.top/prism-fusion/global"
-	"whitestone.top/prism-fusion/plugin"
+	"github.com/kwhitestone/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/plugin"
 )
 
 // handler 注入点：conversation/a2a addon 实现 Handler 后注入。

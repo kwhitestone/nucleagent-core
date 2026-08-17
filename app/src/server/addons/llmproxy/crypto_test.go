@@ -8,7 +8,7 @@ import (
 	"github.com/nucleagent/nucleagent-shared/llm"
 	"github.com/spf13/viper"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // setMasterKey 设置测试用 MASTER_KEY（32 字节 hex）。

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	authservice "whitestone.top/prism-fusion/addons/auth/service"
+	authservice "github.com/kwhitestone/prism-fusion/addons/auth/service"
 )
 
 // ErrNotFound 文件不存在（storage 返回 404，或命名空间不符）。

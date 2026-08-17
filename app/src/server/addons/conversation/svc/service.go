@@ -20,7 +20,7 @@ import (
 	"nucleagent-core/addons/executorreg"
 	"nucleagent-core/addons/llmproxy"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 	"gorm.io/gorm"
 )
 

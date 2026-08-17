@@ -13,12 +13,12 @@ import (
 	"nucleagent-core/addons/llmproxy"
 	"nucleagent-core/internal/storageclient"
 
-	"whitestone.top/prism-fusion/core"
-	"whitestone.top/prism-fusion/global"
-	"whitestone.top/prism-fusion/initialize"
+	"github.com/kwhitestone/prism-fusion/core"
+	"github.com/kwhitestone/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/initialize"
 
 	// 框架内置 auth/rbac（core 需要 JWT 认证 + RBAC）。
-	_ "whitestone.top/prism-fusion/addons"
+	_ "github.com/kwhitestone/prism-fusion/addons"
 	// nucleagent-core 业务插件：coredata / llmproxy / executorreg / conversation。
 	_ "nucleagent-core/addons"
 )

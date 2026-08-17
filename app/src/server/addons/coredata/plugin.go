@@ -12,8 +12,8 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/nucleagent/nucleagent-shared/model"
 	"nucleagent-core/addons/llmproxy"
-	"whitestone.top/prism-fusion/global"
-	"whitestone.top/prism-fusion/plugin"
+	"github.com/kwhitestone/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/plugin"
 )
 
 // CoreDataPlugin 核心数据迁移 + seed 插件。

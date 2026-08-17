@@ -9,7 +9,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/nucleagent/nucleagent-shared/model"
 	"go.uber.org/zap"
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // RegisterRoutes 注册 Agent 路由（模板只读 + 实例 CRUD）。

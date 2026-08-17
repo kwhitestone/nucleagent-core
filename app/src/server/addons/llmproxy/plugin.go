@@ -7,7 +7,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/nucleagent/nucleagent-shared/llm"
-	"whitestone.top/prism-fusion/plugin"
+	"github.com/kwhitestone/prism-fusion/plugin"
 )
 
 // LLMProxyPlugin LLM 代理插件。
