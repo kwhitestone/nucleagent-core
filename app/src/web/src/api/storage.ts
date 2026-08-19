@@ -105,10 +105,10 @@ async function sha256Hex(file: File): Promise<string> {
  *
  * 三步：
  *   1. presign  —— 向 storage 换上传凭证（拿 fileId + 已签名的 CS 地址）
- *   2. 直传     —— 浏览器把字节 POST 给 CS，拿回 dentry_id
- *   3. register —— 把 dentry_id 回填给 storage，记录置为 active
+ *   2. 直传     —— 浏览器把字节 POST 给存储后端，拿回引用 ID
+ *   3. register —— 把引用 ID 回填给 storage，记录置为 active
  *
- * 第 3 步必须回传 dentryId 而非签名 URL：storage 会把 dentryId 收敛成
+ * 第 3 步必须回传 refId 而非签名 URL：storage 会把 refId 收敛成
  * `cs-dentry://`（服务端 resolveStoredURL 的正路）。若回传签名 URL，那条
  * 带过期 token 的地址会被存进 DB，几小时后文件永久 403。
  */
@@ -132,7 +132,7 @@ export async function uploadFile(
   }
 
   // 2. 直传存储后端（CS 或 local blob 端点）。
-  const dentryId = await uploadBytes(file, presign, onProgress);
+  const refId = await uploadBytes(file, presign, onProgress);
 
   // 3. register：补齐元数据并置 active。
   const sha256 = await sha256Hex(file);
@@ -141,7 +141,7 @@ export async function uploadFile(
     "/api/v1/files",
     {
       fileId: presign.fileId,
-      dentryId,
+      refId,
       name: file.name,
       size: file.size,
       mimeType,
@@ -162,7 +162,7 @@ export async function uploadFile(
 }
 
 /**
- * 把字节直传到存储后端，返回 dentry_id（CS 后端才有；local 后端返回空串）。
+ * 把字节直传到存储后端，返回引用 ID（引用型后端才有；local 后端返回空串）。
  *
  * 用原生 XHR 而非 fetch：需要上传进度（fetch 没有 upload progress 事件）。
  * 刻意**不带 Authorization**：签名已在 URL 里，多带头会触发 CORS 预检从而失败。
@@ -196,8 +196,8 @@ function uploadBytes(
         reject(new UploadError(`上传失败（${xhr.status}）`));
         return;
       }
-      // CS 返回 { dentry_id, inode: {...} }（snake_case 是 CS 自己的约定）。
-      // local 后端没有 dentry_id，返回空串让 storage 用 presign 预置地址。
+      // 引用型后端返回 { dentry_id }（snake_case 是后端自己的约定）。
+      // local 后端没有引用 ID，返回空串让 storage 用 presign 预置地址。
       try {
         const body = JSON.parse(xhr.responseText || "{}") as { dentry_id?: string };
         resolve(body.dentry_id ?? "");
