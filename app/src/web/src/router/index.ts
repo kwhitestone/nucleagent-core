@@ -62,10 +62,15 @@ const router = createRouter({
 // core 假定 JWT 已由主壳登录弹窗写入 localStorage（沙箱/iframe 同源共享）。
 // 嵌入模式下不做 window.location 跳转（iframe 里会导航到不存在的 /auth 导致白屏），
 // 让壳决定何时弹登录。独立 dev 时才跳 /auth。
+// 独立 dev 时本站没有 /auth 路由（登录页在主壳），跳本站会落进 404 兜底再
+// redirect 回 /chat，形成无限刷新循环。因此未登录时跳主壳的 auth 页；
+// 壳地址可通过 VITE_SHELL_URL 覆盖。
+const SHELL_URL = import.meta.env.VITE_SHELL_URL ?? "http://localhost:26600";
+
 router.beforeEach((to) => {
   if (to.meta.requiresAuth && !getAccessToken()) {
     if (!isEmbedded && typeof window !== "undefined") {
-      window.location.href = "/auth";
+      window.location.href = `${SHELL_URL}/auth`;
     }
     // 嵌入模式下放行：首页/创作/任务在未登录时可浏览（无数据时显示空态），
     // 对话视图在未登录时由后端 401 兜底。

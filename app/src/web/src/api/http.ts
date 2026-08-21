@@ -49,15 +49,16 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 function redirectToAuth(): void {
   clearAccessToken();
   if (typeof window === "undefined") return;
-  // 在 micro-app 子应用模式下，不做 window.location 硬跳转（会劫持整个壳的 URL）。
-  // 只清 token，让壳应用自行决定何时切到 auth 子应用。
+  // 嵌入模式（micro-app 沙箱或 iframe）下不做 window.location 硬跳转：
+  // iframe 里跳壳会把整个壳加载进 iframe，形成嵌套套娃；micro-app 会劫持壳的
+  // URL。只清 token，等壳通过 postMessage 把新 token 推过来（useShellBridge）。
   const w = globalThis as Record<string, unknown>;
-  if (w.__MICRO_APP_ENVIRONMENT__) return;
-  // 独立运行时跳 /auth。
-  const path = window.location.pathname;
-  if (!path.startsWith("/auth")) {
-    window.location.href = "/auth";
-  }
+  const isEmbedded = w.__MICRO_APP_ENVIRONMENT__ === true ||
+    (typeof window !== "undefined" && window.parent !== window);
+  if (isEmbedded) return;
+  // 独立运行时跳主壳的 /auth（本站没有该路由，跳本站会死循环）。
+  const shellUrl = import.meta.env.VITE_SHELL_URL ?? "http://localhost:26600";
+  window.location.href = `${shellUrl}/auth`;
 }
 
 http.interceptors.response.use(
