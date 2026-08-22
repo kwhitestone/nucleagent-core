@@ -94,6 +94,14 @@ export async function followUp(
 }
 
 /**
+ * POST /conversation/:id/cancel — 取消正在执行的对话（后端取消 runner，
+ * 对话置 cancelled）。对话未在执行时后端返回 404。
+ */
+export async function cancelConversation(conversationId: number | string): Promise<void> {
+  await http.post(`${BASE}/${conversationId}/cancel`);
+}
+
+/**
  * PATCH /conversation/:id — 切换对话使用的模型/提供商。
  *
  * 只落库，下一轮执行才生效（后端会在下次 dispatch 时让 executor 重建

@@ -1,183 +1,41 @@
 <script setup lang="ts">
 /**
- * 对话视图 —— 对齐 design/nucleagent-design.html 第 1849–1926 行。
+ * 对话视图 —— 基于 src/task-conversation 组件（自 agentia 拷贝自维护）。
  *
- * 消息列表（用户/助手气泡）+ 输入框工具栏。
- * 替代旧版：去掉自带侧栏与头部（chrome 上移到壳），换上设计稿的气泡样式。
+ * 组件负责：消息列表渲染（含 process 折叠/展开）、流式 upsert、乐观发送、
+ * 滚动跟随、Composer（发送/停止/附件）。宿主职责见 adapter（映射规则在
+ * composables/useConversationAdapter.ts 头注释）。
+ *
+ * 宿主补充：
+ *   - ModelPicker 经 composer-toolbar-leading 插槽注入（仍走 PATCH 落库）。
+ *   - error 消息用自定义 renderer（红底错误气泡，不渲染 markdown）。
+ *   - tool_call / thinking 走 process lane，组件渲染为可折叠过程条目
+ *     （标题取 senderName），不需要自定义 renderer。
+ *   - 附件上传复用组件的 uploadAttachment 边界 → api/storage.uploadFile。
  */
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
 import { ApiError } from "@/api/http";
-import {
-  followUp as followUpApi,
-  getMessages,
-  updateConversationModel,
-} from "@/api/conversation";
-import type { Message, MessageAttachment, ModelChoice } from "@/api/types";
-import { useStreamConversation } from "@/composables/useStreamConversation";
+import { updateConversationModel } from "@/api/conversation";
+import type { ModelChoice } from "@/api/types";
+import type { ConversationAdapter } from "@/task-conversation/core";
+import type { ConversationRendererRegistry } from "@/task-conversation/vue";
+import { TaskConversation } from "@/task-conversation/vue";
+import "@/task-conversation/styles.css";
+import { createConversationAdapter } from "@/composables/useConversationAdapter";
 import { toast } from "@/composables/useToast";
-import AttachmentPicker from "@/components/AttachmentPicker.vue";
-import AttachmentChips from "@/components/AttachmentChips.vue";
 import ModelPicker from "@/components/ModelPicker.vue";
-
-/**
- * 读取一条消息上的附件清单。
- *
- * 后端写在 metadata.attachments（model/message.go 预留的 key）。metadata 的类型是
- * Record<string, unknown>，这里做一次运行时窄化 —— 坏数据按无附件处理，不让一条
- * 脏记录把整个消息列表炸掉。
- */
-function messageAttachments(m: Message): MessageAttachment[] {
-  const raw = m.metadata?.attachments;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (a): a is MessageAttachment =>
-      typeof a === "object" && a !== null && typeof (a as MessageAttachment).fileId === "string",
-  );
-}
-
-/** Markdown → 安全 HTML（防 XSS）。 */
-function renderMarkdown(text: string): string {
-  if (!text) return "";
-  const html = marked.parse(text, { breaks: true, async: false }) as string;
-  return DOMPurify.sanitize(html);
-}
+import ErrorBubble from "@/components/conversation/ErrorBubble.vue";
+import MessageItem from "@/components/conversation/MessageItem.vue";
 
 const props = defineProps<{ id: string }>();
 const { t } = useI18n();
 
-const messages = ref<Message[]>([]);
-const loading = ref(true);
-const followUp = ref("");
-const sending = ref(false);
-/** 本轮追问要带的附件（选中即已上传，这里只持有引用）。 */
-const followUpAttachments = ref<MessageAttachment[]>([]);
-/**
- * 对话当前选定的模型；null = 沿用服务端现值。
- *
- * 切换后走 PATCH 立即落库，下一轮生效（后端会让 executor 重建 hermes session ——
- * 模型是建 session 时固化的）。同时随下一次 follow-up 一起下发，双保险。
- */
+/** conversationKey 变化时组件 controller 会自动重新 initialize。 */
+const adapter = computed<ConversationAdapter>(() => createConversationAdapter(() => props.id));
+
 const modelChoice = ref<ModelChoice | null>(null);
 
-/** 显示用户消息（text）、流式回复（streaming）、最终回复（result）、
- *  工具调用（tool_call）、错误（error）。
- *  agent.thinking 的 streaming 行（含子代理输出）保留，但**同轮已出错时隐藏**——
- *  否则后端失败后前端仍挂着「正在处理…」转圈，永远不告诉用户出了什么事。
- *  主代理的 streaming 行在有同轮 result 后隐藏（避免重复）。 */
-const visibleMessages = computed(() => {
-  const resultDelegations = new Set(
-    messages.value
-      .filter((m) => m.msgType === "result" && m.metadata?.delegation_id)
-      .map((m) => m.metadata?.delegation_id as string),
-  );
-  // 已出错的 delegation：其 streaming 行（含 agent.thinking）不再显示，
-  // 由 error 气泡取代，避免「转圈 + 无输出」的静默失败。
-  const erroredDelegations = new Set(
-    messages.value
-      .filter((m) => m.msgType === "error" && m.metadata?.delegation_id)
-      .map((m) => m.metadata?.delegation_id as string),
-  );
-  return messages.value.filter((m) => {
-    if (m.msgType === "text" || m.msgType === "result") return true;
-    // error 必须渲染：这是用户唯一能看到失败原因的地方。
-    if (m.msgType === "error") return true;
-    if (m.msgType === "tool_call") {
-      return (m.content || "").trim() !== "";
-    }
-    if (m.msgType === "streaming") {
-      const del = m.metadata?.delegation_id as string;
-      // 本轮已出错 → 隐藏残留的 streaming 行
-      if (del && erroredDelegations.has(del)) return false;
-      // agent.thinking 行（思考过程 + 子代理输出）保留
-      if (m.senderName === "agent.thinking") return true;
-      // 主代理 streaming 行：同轮 result 存在则隐藏
-      if (del && resultDelegations.has(del)) return false;
-      return true;
-    }
-    return false;
-  });
-});
-
-const scroller = ref<HTMLElement | null>(null);
-let abort: AbortController | null = null;
-
-const { streamingId, consumeStream } = useStreamConversation(props.id, messages);
-
-async function scrollToBottom(): Promise<void> {
-  await nextTick();
-  const el = scroller.value;
-  if (el) el.scrollTop = el.scrollHeight;
-}
-
-/** 格式化消息时间（精确到秒）：2026-08-09 12:34:56 */
-function formatTime(iso: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
-// 消息列表变化时自动滚到底（SSE 推送的 agent 消息异步到达）。
-watch(
-  () => visibleMessages.value.length,
-  () => { void scrollToBottom(); },
-);
-
-async function loadHistory(): Promise<void> {
-  loading.value = true;
-  try {
-    messages.value = await getMessages(props.id);
-    await scrollToBottom();
-  } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : t("conversation.loadMessagesFailed"));
-  } finally {
-    loading.value = false;
-  }
-}
-
-/**
- * 发送 follow-up（多轮对话）。
- *
- * 只 POST 触发后端执行——流式 agent 回复由 onMounted 建立的**长期 SSE 连接**
- * 自动推送并渲染（见 useStreamConversation）。不要在这里再开第二个 SSE 订阅，
- * 那会阻塞 sending 永不解锁（broker channel 在连接存活期间持续阻塞）。
- *
- * sending 在收到本轮终态消息（result/error）后由下方 watch 解锁。
- */
-async function handleFollowUp(): Promise<void> {
-  const text = followUp.value.trim();
-  if (!text || sending.value) return;
-  sending.value = true;
-  followUp.value = "";
-  // 先取快照再清空：失败时要能原样恢复，不能让用户重新选一遍附件。
-  const atts = followUpAttachments.value.map((a) => ({ fileId: a.fileId, name: a.name }));
-  const attsBackup = followUpAttachments.value;
-  followUpAttachments.value = [];
-
-  try {
-    // 模型选择随本轮一起下发：即使上面的 PATCH 因为网络原因没落库，
-    // 这一轮也会用上用户选的模型（后端对同值切换是幂等的）。
-    await followUpApi(props.id, text, atts, modelChoice.value ?? undefined);
-    // 不 await consumeStream；agent 回复经长期 SSE 连接到达。
-  } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : t("conversation.sendFailed"));
-    // 复原输入与附件，用户可直接重试。
-    followUp.value = text;
-    followUpAttachments.value = attsBackup;
-    sending.value = false;
-  }
-}
-
-/**
- * 切换模型：立即 PATCH 落库，下一轮生效。
- *
- * 不等下一次 follow-up 才提交，是为了让选择立刻持久化 —— 用户可能切完模型就
- * 关掉页面，回来时应当还是新模型。失败则回滚 UI，不让界面显示一个没生效的选择。
- */
 async function switchModel(next: ModelChoice | null): Promise<void> {
   const prev = modelChoice.value;
   modelChoice.value = next;
@@ -191,291 +49,172 @@ async function switchModel(next: ModelChoice | null): Promise<void> {
   }
 }
 
-// 标记本轮是否已出现过 streaming（用于判断执行周期，避免被初始历史误触发）。
-let sawStreamingThisCycle = false;
-watch(
-  () => streamingId.value,
-  (cur, prev) => {
-    // 从 null -> 有值：新一轮 streaming 开始。
-    if (cur !== null) sawStreamingThisCycle = true;
-    // 从有值 -> null 且本轮有过 streaming：终态到达，解锁输入框。
-    if (cur === null && prev !== null && sawStreamingThisCycle && sending.value) {
-      sending.value = false;
-      sawStreamingThisCycle = false;
-    }
-  },
-);
+/** 自定义 renderer：error → 红底气泡（system lane）。 */
+const renderers: ConversationRendererRegistry = {
+  error: ErrorBubble,
+};
 
-// error 是终态：后端已置 conversation.status=failed，本轮不会再有消息。
-// 单独解锁输入框——否则失败后输入框一直 disabled，用户既看不到原因也重试不了。
-watch(
-  () => messages.value.filter((m) => m.msgType === "error").length,
-  (cur, prev) => {
-    if (cur > prev && sending.value) {
-      sending.value = false;
-      sawStreamingThisCycle = false;
-    }
-  },
-);
-
-onMounted(async () => {
-  await loadHistory();
-  abort = new AbortController();
-  void consumeStream(abort.signal);
-});
-
-// 路由在同组件内切换（/chat/75 → /chat/73）时 onMounted 不再触发，
-// 需 watch props.id 重新加载消息 + 重建 SSE 流，否则主区域停在旧对话内容。
-watch(
-  () => props.id,
-  async (newId, oldId) => {
-    if (newId === oldId) return;
-    // 中断旧 SSE 流。
-    abort?.abort();
-    messages.value = [];
-    sawStreamingThisCycle = false;
-    sending.value = false;
-    // 重新加载新对话消息 + 重建 SSE（传新 id）。
-    await loadHistory();
-    abort = new AbortController();
-    void consumeStream(abort.signal, newId);
-  },
-);
-
-onUnmounted(() => {
-  abort?.abort();
-});
-
-// 引用 streamingId 避免 TS 未使用告警（SSE 流式消息高亮由 MessageBubble 内部用）。
-void streamingId;
+function onError(error: Error): void {
+  toast.error(error.message);
+}
 </script>
 
 <template>
   <div class="view active view--scroll-hidden">
     <div class="chat-view">
-      <div ref="scroller" class="chat-messages">
-        <p v-if="!loading && visibleMessages.length === 0" class="chat-empty">{{ t('conversation.empty') }}</p>
-
-        <template v-for="m in visibleMessages" :key="m.id">
-          <!-- tool_call：紧凑工具标签条（显示 agent 正在做什么） -->
-          <div v-if="m.msgType === 'tool_call'" class="tool-tag">
-            <span class="tool-icon">🔧</span>
-            <span class="tool-name">{{ m.senderName }}</span>
-            <span class="tool-detail">{{ m.content || '...' }}</span>
-          </div>
-          <!-- error：失败原因（不渲染 markdown，原样展示后端错误文本） -->
-          <div v-else-if="m.msgType === 'error'" class="error-bubble">
-            <span class="error-icon">⚠</span>
-            <div class="error-body">
-              <div class="error-title">{{ t('conversation.failed') }}</div>
-              <div class="error-detail">{{ m.content || t('conversation.sendFailed') }}</div>
-              <div v-if="m.createdAt" class="error-time">{{ formatTime(m.createdAt) }}</div>
-            </div>
-          </div>
-          <!-- 正常消息气泡 -->
-          <div v-else class="message" :class="m.senderType === 'user' ? 'user' : 'assistant'">
-          <div class="message-avatar">
-            <template v-if="m.senderType === 'user'">{{ t('conversation.you') }}</template>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" /><path d="M12 22V12" /><path d="M4 7l8 5 8-5" /></svg>
-          </div>
-          <div class="message-content">
-            <div class="message-header">
-              <span class="message-author">{{ m.senderType === "user" ? t('conversation.you') : t('home.greeting') }}</span>
-              <span v-if="m.createdAt" class="message-time">{{ formatTime(m.createdAt) }}</span>
-            </div>
-            <div class="message-bubble" v-html="renderMarkdown(m.content || '')" />
-            <!-- 附件必须是真实 Vue 节点：气泡内容过 DOMPurify，注入的元素点不动。 -->
-            <AttachmentChips :attachments="messageAttachments(m)" />
-          </div>
-          </div>
+      <TaskConversation
+        :conversation-key="id"
+        :adapter="adapter"
+        :capabilities="{ send: true, stop: true, attachments: true }"
+        :renderers="renderers"
+        :show-process="true"
+        locale="zh-CN"
+        @error="onError"
+      >
+        <template #user-item="{ item }">
+          <MessageItem :item="item" role="user" />
         </template>
-      </div>
-
-      <div class="chat-composer-wrap">
-        <div class="chat-composer">
-          <textarea
-            v-model="followUp"
-            :placeholder="t('conversation.followUpPlaceholder')"
-            :disabled="sending"
-            @keydown.enter.exact.prevent="handleFollowUp"
+        <template #assistant-item="{ item }">
+          <MessageItem :item="item" role="assistant" />
+        </template>
+        <template #composer-toolbar-leading>
+          <ModelPicker
+            :model-value="modelChoice"
+            compact
+            @update:model-value="switchModel"
           />
-          <div class="composer-toolbar">
-            <ModelPicker
-              :model-value="modelChoice"
-              :disabled="sending"
-              compact
-              @update:model-value="switchModel"
-            />
-            <AttachmentPicker v-model="followUpAttachments" :disabled="sending" show-label />
-            <button class="tool-btn active" type="button" :title="t('conversation.agentMode')">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
-              {{ t('conversation.agentMode') }}
-            </button>
-            <button class="composer-btn send" type="button" :title="t('common.send')" :disabled="sending || !followUp.trim()" @click="handleFollowUp">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-            </button>
-          </div>
-          <AttachmentChips
-            :attachments="followUpAttachments"
-            removable
-            @remove="(id: string) => (followUpAttachments = followUpAttachments.filter((a) => a.fileId !== id))"
-          />
-        </div>
-      </div>
+        </template>
+      </TaskConversation>
     </div>
   </div>
 </template>
 
 <style>
-/* 设计稿第 838–1067 行。 */
+/* 对话主区由组件渲染（.atc-* 命名空间）。这里做两件事：
+   1) 外壳布局；
+   2) 把 --atc-* 设计变量接到 aurora token —— 组件默认是自带的一套
+      白底蓝色主题，不重定向会跟全站视觉完全脱节。 */
 .chat-view {
   display: flex; flex-direction: column; height: 100%;
   max-width: 820px; margin: 0 auto; width: 100%;
 }
 
-.chat-messages {
-  flex: 1; overflow-y: auto; padding: 32px 24px;
-  display: flex; flex-direction: column; gap: 24px;
+.chat-view .atc-root {
+  --atc-bg: var(--bg);
+  --atc-surface: var(--bg-subtle);
+  --atc-surface-strong: var(--bg-hover);
+  --atc-text: var(--text-primary);
+  --atc-text-muted: var(--text-tertiary);
+  --atc-border: var(--border);
+  --atc-accent: var(--indigo-500);
+  --atc-accent-hover: var(--indigo-600);
+  --atc-accent-contrast: #ffffff;
+  --atc-danger: #dc2626;
+  --atc-content-width: 820px;
+  --atc-radius: var(--r-lg);
+  flex: 1; min-height: 0;
+  font-family: var(--font-body);
 }
 
-.chat-empty { color: var(--text-tertiary); text-align: center; padding-top: 40px; }
 
-/* 工具调用标签条（紧凑显示 agent 正在做什么） */
-.tool-tag {
+.chat-view .atc-assistant-item { margin-bottom: 18px; }
+.chat-view .atc-item + .atc-assistant-item,
+.chat-view .atc-process + .atc-assistant-item { margin-top: 0; }
+
+/* 用户消息外壳归零：组件默认会给 .atc-user-item 加气泡（灰底/padding/圆角），
+   我们的气泡在 MessageItem 插槽里画，这里必须全部抵消，否则框中框。 */
+.chat-view .atc-user-item {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0 0 18px auto;
+  width: auto;
+  max-width: 78%;
+  box-shadow: none;
+  border-radius: 0;
+  overflow: visible;
+}
+
+/* 过程条目（思考/工具）：紧凑标签条，对齐旧版 .tool-tag 观感 */
+.chat-view .atc-process {
+  border-left: none;
+  /* 对齐助手气泡左缘：头像 28 + gap 12 = 40px */
+  margin: 0 0 8px 40px;
+  width: fit-content;
+  max-width: calc(100% - 40px);
+}
+.chat-view .atc-process-summary {
   display: flex; align-items: center; gap: 6px;
-  padding: 4px 12px; margin-left: 48px;
+  padding: 4px 12px;
   font-size: 12px; color: var(--text-tertiary);
   background: var(--bg-hover); border-radius: var(--r-sm);
   width: fit-content; max-width: 80%;
 }
-.tool-icon { font-size: 12px; }
-.tool-name { font-weight: 600; color: var(--indigo-600); }
-.tool-detail { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* 错误气泡：失败原因必须显眼且可选中复制（排查用） */
-.error-bubble {
-  display: flex; gap: 10px; align-items: flex-start;
-  margin-left: 48px; max-width: 85%; width: fit-content;
-  padding: 10px 14px;
-  background: #fef2f2; border: 1px solid #fecaca;
-  border-radius: var(--r-md);
-  animation: fade-in-up 0.4s var(--ease-out) both;
+.chat-view .atc-process-summary:hover { background: var(--bg-subtle); }
+/* 思考中（内容仍在流式更新）：label 前加呼吸点，一眼看出还活着 */
+@keyframes atc-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.chat-view .atc-process-marker {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--indigo-500);
+  flex-shrink: 0;
 }
-.error-icon { font-size: 14px; line-height: 1.5; color: #dc2626; flex-shrink: 0; }
-.error-body { min-width: 0; }
-.error-title { font-size: 13px; font-weight: 600; color: #b91c1c; margin-bottom: 2px; }
-.error-detail {
-  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
-  color: #7f1d1d; word-break: break-word; user-select: text;
+/* 只有「活跃思考」才脉冲：data-status 由组件按 item.status 输出，
+   思考结束（streaming→complete）动画自然停止。历史过程条不动画。 */
+.chat-view details.atc-process[data-status="streaming"] .atc-process-marker {
+  animation: atc-pulse 1.2s ease-in-out infinite;
 }
-.error-time { font-size: 11px; color: #b91c1c; opacity: 0.7; margin-top: 4px; font-variant-numeric: tabular-nums; }
-
-.message {
-  display: flex; gap: 14px; max-width: 100%;
-  animation: fade-in-up 0.4s var(--ease-out) both;
+.chat-view .atc-process-marker { color: var(--indigo-500); }
+.chat-view .atc-process-label {
+  font-weight: 600; color: var(--indigo-600); white-space: nowrap;
 }
-
-.message-avatar {
-  width: 34px; height: 34px; border-radius: var(--r-md);
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0; font-weight: 600; font-size: 13px;
+.chat-view .atc-process-preview {
+  color: var(--text-tertiary); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; font-weight: 400;
 }
-
-.message.user .message-avatar {
-  background: var(--grad-teal-indigo); background-size: 200% 200%;
-  animation: gradient-flow 5s var(--ease) infinite;
-  color: white; box-shadow: var(--shadow-glow-teal);
+.chat-view .atc-process-content {
+  margin: 4px 0 8px 0;
+  font-size: 12.5px; color: var(--text-tertiary);
+  background: var(--bg-subtle); border-radius: var(--r-md);
+  padding: 8px 12px;
 }
+/* 流式中的过程条目（思考中）：呼吸动画，提示活跃 */
+.chat-view details.atc-process:has(.atc-process-label) { transition: opacity 0.2s; }
 
-.message.assistant .message-avatar {
-  background: var(--grad-violet-fuchsia); background-size: 200% 200%;
-  animation: gradient-flow 5s var(--ease) infinite;
-  color: white; box-shadow: var(--shadow-glow-violet);
-}
-
-.message.assistant .message-avatar svg { width: 18px; height: 18px; }
-
-.message-content { flex: 1; min-width: 0; }
-
-.message-author { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-
-.message-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
-.message-time { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
-
-.message-bubble { font-size: 14px; color: var(--slate-700); line-height: 1.65; }
-.message-bubble p { margin-bottom: 8px; }
-.message-bubble p:last-child { margin-bottom: 0; }
-.message-bubble code {
+/* 助手 markdown：行内 code / 代码块用全站样式 */
+.chat-view .atc-item code {
   font-family: var(--font-mono); font-size: 12.5px;
   background: var(--grad-brand-soft);
   padding: 1px 6px; border-radius: 4px; color: var(--indigo-600);
 }
-.message-bubble pre {
+.chat-view .atc-item pre {
   background: #1e293b; color: #e2e8f0; border-radius: 8px;
   padding: 12px 16px; overflow-x: auto; margin: 8px 0;
 }
-.message-bubble pre code {
-  background: none; color: inherit; padding: 0; font-size: 13px;
+/* 流式文本也是 <pre>（.atc-stream-text）——必须排除深色代码块底，
+   否则输出中深底、完成切 markdown 后变白，观感就是"输出时颜色不对"。 */
+.chat-view .atc-item pre.atc-stream-text {
+  background: none; color: var(--slate-700); padding: 0; margin: 0;
+  font-family: var(--font-body); font-size: 14px; line-height: 1.7;
 }
-.message-bubble table {
-  border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px;
-}
-.message-bubble th, .message-bubble td {
+.chat-view .atc-item pre code { background: none; color: inherit; padding: 0; font-size: 13px; }
+.chat-view .atc-item table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
+.chat-view .atc-item th, .chat-view .atc-item td {
   border: 1px solid var(--border); padding: 6px 10px; text-align: left;
 }
-.message-bubble th { background: var(--bg-hover); font-weight: 600; }
-.message-bubble ul, .message-bubble ol { padding-left: 20px; margin: 6px 0; }
-.message-bubble h1, .message-bubble h2, .message-bubble h3 {
-  font-size: 15px; font-weight: 600; margin: 10px 0 6px;
-}
+.chat-view .atc-item th { background: var(--bg-hover); font-weight: 600; }
 
-.chat-composer-wrap {
-  padding: 12px 24px 20px;
-  background: linear-gradient(to top, var(--bg) 60%, transparent);
-}
-
-.chat-composer {
-  background: rgba(255, 255, 255, 0.9);
+/* Composer：毛玻璃 + 品牌聚焦（对齐旧版 .chat-composer） */
+.chat-view .atc-composer-shell { background: transparent; }
+.chat-view .atc-composer {
+  background: rgb(255 255 255 / 90%);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-  border: 1.5px solid var(--border); border-radius: var(--r-xl);
-  padding: 6px; box-shadow: var(--shadow-md);
-  display: flex; align-items: flex-end; gap: 8px;
-  transition: all 0.3s var(--ease);
+  border: 1.5px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-md);
 }
-
-.chat-composer:focus-within {
+.chat-view .atc-composer:focus-within {
   border-color: var(--teal-300);
-  box-shadow: var(--shadow-lg), 0 0 0 4px rgba(20, 184, 166, 0.08);
-  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg), 0 0 0 4px rgb(20 184 166 / 8%);
 }
-
-.chat-composer textarea {
-  flex: 1; border: none; outline: none; resize: none; background: transparent;
-  font-family: var(--font-body); font-size: 14.5px; color: var(--text-primary);
-  padding: 12px 14px; max-height: 160px; line-height: 1.5;
-}
-
-.chat-composer textarea::placeholder { color: var(--text-tertiary); }
-.chat-composer textarea:disabled { opacity: 0.6; }
-
-.composer-toolbar {
-  display: flex; align-items: center; gap: 2px;
-  padding: 4px 4px 4px 8px; border-left: 1px solid var(--border);
-}
-
-.tool-btn {
-  display: flex; align-items: center; gap: 5px;
-  padding: 6px 10px; border-radius: var(--r-sm);
-  border: none; background: transparent; cursor: pointer;
-  font-size: 12px; font-weight: 500; color: var(--text-tertiary);
-  transition: all 0.2s var(--ease); white-space: nowrap;
-}
-
-.tool-btn:hover { background: var(--bg-hover); color: var(--text-primary); transform: scale(1.05); }
-
-.tool-btn.active {
-  background: var(--grad-brand-soft); color: var(--indigo-600); box-shadow: var(--shadow-xs);
-}
-
-.tool-btn svg { width: 14px; height: 14px; }
+.chat-view .atc-composer-input { font-family: var(--font-body); }
 </style>
