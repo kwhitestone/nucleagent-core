@@ -41,6 +41,8 @@ func (p *ConversationPlugin) Priority() int { return 40 }
 func (p *ConversationPlugin) RegisterRoutes(api huma.API) {
 	// 把对话服务注入 executorreg，作为 executor 上报信封的 handler。
 	executorreg.SetHandler(svc.Default)
+	// 注入带外续轮开启回调（delegate_task 后台完成后的 turn 2 执行上下文）。
+	executorreg.SetAsyncContinuationStarter(svc.Default)
 	convRouter.RegisterRoutes(api)
 	global.PRISM_LOG.Info("Conversation plugin routes registered")
 }

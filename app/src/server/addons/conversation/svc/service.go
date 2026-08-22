@@ -274,6 +274,12 @@ func (s *Service) dispatch(ctx context.Context, conv *model.Conversation, input 
 		// 历史随 Context 全量重注，不丢上下文。
 		execHeaders[headerSessionReset] = "1"
 	}
+	// 在飞后台委托：要求 executor 在本轮结束后接管 watcher（即使本轮自己没
+	// delegate_task —— turn 1 派的子代理可能还没完成）。executor 无状态，
+	// 靠这个头知道要不要监听 turn 2（跨重启依然成立：标志在 core DB 里）。
+	if delegationPendingInDB(conv.ID) {
+		execHeaders[headerDelegationWatch] = "1"
+	}
 
 	execReq := a2a.ExecutionRequest{
 		ConversationID: conv.ID,
@@ -381,6 +387,12 @@ func (s *Service) OnStreamEvent(env *a2a.Envelope, p a2a.A2AStreamEventPayload) 
 		}
 		db.Create(toolMsg)
 		stream.Default.PublishCreated(p.ConversationID, toolMsg)
+		// delegate_task = 后台委托启动。持久化「在飞」标志 —— 之后任何到达该
+		// 对话的 a2a_request 都带 x-delegation-watch，executor（无状态）据此在
+		// Run 结束后接管 watcher。标志由 watcher 的终结信号（DelegationSettled）清除。
+		if p.Tool == "delegate_task" {
+			markDelegationPending(p.ConversationID)
+		}
 	}
 }
 
@@ -437,6 +449,82 @@ func (s *Service) OnTaskResult(env *a2a.Envelope, p a2a.A2ATaskResultPayload) {
 
 	// 撤销 TempLLMKey。
 	llmproxy.Default.RevokeByConversation(p.ConversationID)
+
+	// 带外续轮终结信号：watcher 报告后台委托链已清（turn 2 完成且无链式派发）。
+	// 清掉持久化的 delegationPending，之后 dispatch 不再下发 x-delegation-watch。
+	if p.DelegationSettled {
+		clearDelegationPending(p.ConversationID)
+	}
+}
+
+// StartAsyncContinuation 开启带外续轮：delegate_task 后台子代理完成后，hermes 会
+// 触发一次全新的 agent turn（turn 2）送回汇总结果。此时原 turn 的 runState 已被
+// OnTaskResult 消费掉、key 已撤销，executor 的 watcher 需要一个新的执行上下文才能
+// 把 turn 2 的事件流和结果回报进来。
+//
+// 幂等：running 已存在（重复通知 / 正在执行的轮次）时复用已有 runState，不重复签 key。
+func (s *Service) StartAsyncContinuation(convID uint) (*executorreg.AsyncContinuationInfo, error) {
+	db := global.PRISM_DB
+
+	var conv model.Conversation
+	if err := db.First(&conv, "id = ?", convID).Error; err != nil {
+		return nil, fmt.Errorf("conversation %d not found: %w", convID, err)
+	}
+
+	s.mu.Lock()
+	if rs, ok := s.running[convID]; ok {
+		// 已有活跃 runState（重复通知或上一续轮未结束）：复用，避免重复签 key。
+		info := &executorreg.AsyncContinuationInfo{StepID: rs.StepID, DelegationID: rs.DelegationID, SenderSlug: rs.SenderSlug}
+		s.mu.Unlock()
+		return info, nil
+	}
+	s.mu.Unlock()
+
+	// 签新 TempLLMKey（turn 1 的 key 已在 OnTaskResult 里撤销）。
+	// 对话未配 provider/model 时返回空 key —— executor watcher 会走与 turn 1
+	// 相同的 FetchKey 兜底（llm-key S2S 端点，provider 来自 executor 配置）。
+	// 这里强签一个 providerID=0 的对话级 key 只会在 llm-proxy 报
+	// "provider 0 not found"（500），反而把 turn 2 打挂。
+	var providerID uint
+	key := ""
+	if conv.ProviderID != nil {
+		providerID = *conv.ProviderID
+	}
+	if providerID != 0 && conv.Model != "" {
+		tempKey := llmproxy.Default.Issue(conv.ID, conv.UserID, providerID, conv.Model, s.tempKeyTTL)
+		key = tempKey.Key
+	}
+
+	// 重建 runState。CancelFn 无对应 dispatch goroutine（续轮由 executor watcher 驱动），
+	// 置 nil；OnTaskResult 对 nil CancelFn 已做判空。
+	rs := &runState{
+		StepID:       uuid.NewString(),
+		DelegationID: uuid.NewString(),
+		SenderSlug:   "agent",
+		ExecBackend:  reqBackendForMode(conv.Mode),
+		ProviderID:   providerID,
+		Model:        conv.Model,
+	}
+	s.mu.Lock()
+	// 双检：并发到达的两个通知只建一个 runState。
+	if existing, ok := s.running[convID]; ok {
+		info := &executorreg.AsyncContinuationInfo{StepID: existing.StepID, DelegationID: existing.DelegationID, SenderSlug: existing.SenderSlug}
+		s.mu.Unlock()
+		return info, nil
+	}
+	s.running[convID] = rs
+	s.mu.Unlock()
+
+	// conversation 回到 executing（前端从 completed 转回进行中）。
+	db.Model(&model.Conversation{}).Where("id = ?", convID).
+		Updates(map[string]any{"status": "executing", "completed_at": nil})
+
+	return &executorreg.AsyncContinuationInfo{
+		Key:          key,
+		StepID:       rs.StepID,
+		DelegationID: rs.DelegationID,
+		SenderSlug:   rs.SenderSlug,
+	}, nil
 }
 
 // OnHeartbeat 处理 executor 心跳：更新 heartbeat_at / lease_until。

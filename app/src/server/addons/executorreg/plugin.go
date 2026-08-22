@@ -23,6 +23,28 @@ var handler Handler
 // SetHandler 注入 core 侧信封处理回调。
 func SetHandler(h Handler) { handler = h }
 
+// AsyncContinuationStarter 带外续轮开启接口。由 conversation/svc 实现、
+// conversation 插件注入（避免 executorreg 反向 import svc 成环）。
+type AsyncContinuationStarter interface {
+	// StartAsyncContinuation 见 conversation/svc.Service 同名方法。
+	StartAsyncContinuation(convID uint) (*AsyncContinuationInfo, error)
+}
+
+// AsyncContinuationInfo 带外续轮信息（executor watcher 用来回报 turn 2）。
+// 与 svc 包的同名字段一致（svc 已 import 本包，由 svc 构造返回）。
+type AsyncContinuationInfo struct {
+	Key          string `json:"key"`
+	StepID       string `json:"stepId"`
+	DelegationID string `json:"delegationId"`
+	SenderSlug   string `json:"senderSlug"`
+}
+
+// asyncStarter 注入点。
+var asyncStarter AsyncContinuationStarter
+
+// SetAsyncContinuationStarter 注入带外续轮开启回调。
+func SetAsyncContinuationStarter(s AsyncContinuationStarter) { asyncStarter = s }
+
 // ExecutorRegPlugin Executor 注册 + WS 服务端插件。
 type ExecutorRegPlugin struct {
 	plugin.BasePlugin
@@ -47,6 +69,8 @@ func (p *ExecutorRegPlugin) RegisterRoutes(api huma.API) {
 	registerHTTPRegister(api)
 	// S2S LLM key 签发端点（executor 启动时换服务级长效 key）。
 	registerHTTPLLMKey(api)
+	// S2S 带外续轮端点（executor watcher 检测到 delegate_task 后台完成时调）。
+	registerHTTPAsyncContinuation(api)
 
 	// WS 升级端点（huma StreamResponse + humagin.Unwrap 拿 gin context）。
 	huma.Register(api, huma.Operation{
@@ -177,6 +201,62 @@ func registerHTTPLLMKey(api huma.API) {
 			Model:        tk.Model,
 			ExpiresIn:    int(time.Until(tk.ExpiresAt).Seconds()),
 		}
+		return resp, nil
+	})
+}
+
+// ---- S2S 带外续轮（delegate_task 后台完成后的 turn 2）----
+
+// AsyncContinuationInput 带外续轮请求（X-Executor-Token 鉴权）。
+type AsyncContinuationInput struct {
+	XExecutorToken string `header:"X-Executor-Token" doc:"S2S 共享令牌"`
+	Body           AsyncContinuationRequest
+}
+
+// AsyncContinuationRequest 带外续轮 body。
+type AsyncContinuationRequest struct {
+	ConversationID uint `json:"conversationId" required:"true"`
+}
+
+// AsyncContinuationOutput 带外续轮响应。
+type AsyncContinuationOutput struct {
+	Body struct {
+		Code    int                     `json:"code" example:"0"`
+		Message string                  `json:"message" example:"ok"`
+		Data    *AsyncContinuationInfo  `json:"data"`
+	} `json:"body"`
+}
+
+// registerHTTPAsyncContinuation 注册 POST /api/v1/addons/s2s/executor/async-continuation/start。
+// executor 的 delegation watcher 检测到 hermes turn 2（后台子代理汇总轮）开始时调用，
+// core 重建 runState + 签新 TempLLMKey，conversation 回 executing；此后 turn 2 的
+// 流式事件与最终结果走正常的 a2a_stream_event / a2a_task_result 通道。
+func registerHTTPAsyncContinuation(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "s2sExecutorAsyncContinuationStart",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/addons/s2s/executor/async-continuation/start",
+		Summary:     "开启带外续轮（S2S）",
+		Description: "executor watcher 检测到 delegate_task 后台完成的汇总 turn 开始时调用：core 重建 runState、签新 TempLLMKey、conversation 回 executing",
+		Tags:        []string{"S2S"},
+	}, func(ctx context.Context, input *AsyncContinuationInput) (*AsyncContinuationOutput, error) {
+		executorToken := global.PRISM_VP.GetString("nucleagent.executor-token")
+		if executorToken != "" && input.XExecutorToken != executorToken {
+			return nil, huma.NewError(http.StatusUnauthorized, "invalid executor token")
+		}
+		if asyncStarter == nil {
+			return nil, huma.NewError(http.StatusServiceUnavailable, "async continuation not configured")
+		}
+		info, err := asyncStarter.StartAsyncContinuation(input.Body.ConversationID)
+		if err != nil {
+			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
+		}
+		global.PRISM_LOG.Info("async continuation started",
+			zap.Uint("conv", input.Body.ConversationID), zap.String("stepId", info.StepID))
+		resp := &AsyncContinuationOutput{}
+		resp.Body.Code = 0
+		resp.Body.Message = "ok"
+		resp.Body.Data = info
 		return resp, nil
 	})
 }
